@@ -251,3 +251,20 @@ class DockStatusBarFactory : StatusBarWidgetFactory {
 - [ ] Ctrl+Alt+D / Cmd+Alt+D 生效，且不与 IDE 默认键冲突
 - [ ] 中文环境下所有文案都有翻译（含通知与 tooltip）
 - [ ] 关项目时 server 停止、注册清理，进程列表里不留东西
+
+---
+
+## 9. 实测更正（2025.3 / build 253.28294.334）
+
+实现本页内容时核对出的差异（都已按右侧落地）：
+
+| 现象 | 真因 | 修法 |
+|---|---|---|
+| `getClickConsumer(): java.util.function.Consumer<MouseEvent>` 编译不过 | 平台用的是自己的 SAM 接口 | `com.intellij.util.Consumer<MouseEvent>?`（注意返回类型可空） |
+| 从 `selectedTextEditor` 拿 `TextEditor` 编译不过 | 2025.3 的 `getSelectedTextEditor()` 直接返回 `Editor` | 直接用 `Editor`；`document`/`caretModel`/`selectionModel` 都在它上面 |
+| 动作用带 `bundle`+`key` 的 `<action>` 担心描述符 | 动作文案走平台自己的 i18n 才有 `%key` 的形式 | 动作的 `text`/`description` 写英文常量（Find Action 里可见），**界面文案**仍然全部走 `DshDockBundle`（130 键中英同步，`scripts/check-strings.mjs` 自检） |
+| 状态栏文案刷新时机 | `StatusBar.updateWidget` 必须在 EDT | 服务统一用 `invokeLater(ModalityState.any())` 推状态，widget 只画最后一次结果 |
+| 设置页 `apply()` 里弹错误框 | 需要一个父组件/项目上下文 | `Messages.showErrorDialog(project, …)` 可用；校验失败时**不写回** state，让用户改完再 Apply |
+
+另外两条与小节号对不上的：动作不是 13 个而是 **11 个**（review 与 mcp 各合并成一个开关），
+`Notification` 的 4 参构造（group/title/content/type）在 2025.3 仍然有效，本页 §6.5 的提醒保留。
