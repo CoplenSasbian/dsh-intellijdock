@@ -1,0 +1,7 @@
+<svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- A dock: a window with a conversation panel on the right. Drawn for 13x13
+       so the tool window strip does not have to scale it. -->
+  <rect x="1" y="1.5" width="11" height="10" rx="1.6" stroke="currentColor" stroke-width="1.1"/>
+  <rect x="7" y="1.5" width="5" height="10" rx="1.2" fill="currentColor" opacity="0.35"/>
+  <path d="M2.6 4.2h2.6M2.6 6.1h3.4M2.6 8h2.2" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+</svg>

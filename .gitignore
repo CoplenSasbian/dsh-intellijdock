@@ -1,0 +1,17 @@
+# build output
+build/
+out/
+.idea/
+*.iml
+
+# IntelliJ Platform Gradle Plugin metadata it writes into the project
+.intellijPlatform/
+
+# local build tooling (JDK 21, the Gradle user home used on this machine)
+.tooling/
+.gradle-home/
+.gradle/
+local.properties
+
+# DSH / QuickDock runtime droppings that sometimes land next to the project
+*.log

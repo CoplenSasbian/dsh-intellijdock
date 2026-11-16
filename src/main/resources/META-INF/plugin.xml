@@ -1,0 +1,127 @@
+<idea-plugin>
+  <!--
+    DSH Dock: QuickDock's DSH UI in a tool window, plus an editor MCP server.
+
+    Two things are easy to get wrong here and both are deliberate:
+    * `<icon>` must not appear under <idea-plugin> (older descriptors reject the
+      whole plugin for it), so the tool window icon is referenced by path only.
+    * `com.intellij.modules.jcef` is available from build 253 on, and it is what
+      keeps the JCEF classes reachable when 2026.2 moves them into a bundled
+      plugin. `since-build=253` matches that.
+  -->
+  <id>dsh.ideadock</id>
+  <name>DSH Dock</name>
+  <vendor url="https://futurvo.cc">futurvo</vendor>
+
+  <description><![CDATA[
+    <p>DeepSeek Harness inside a JetBrains IDE: the running DSH session in a tool
+    window, with tool cards, approvals and model controls, and a set of editor
+    tools for the agent (workspace, selection, diagnostics, symbols, definitions,
+    references, review diffs).</p>
+    <p>Everything stays on <code>127.0.0.1</code>. The dock is the
+    <b>dsh-quickdock</b> DSH plugin's own shell page, embedded in an iframe; the
+    editor tools reach DSH through the workspace MCP bridge that plugin runs.</p>
+    <p>Requirements: DSH installed, and the <b>dsh-quickdock</b> plugin (with the
+    app-proxy capability) enabled in it.</p>
+  ]]></description>
+
+  <depends>com.intellij.modules.platform</depends>
+  <!--
+    Optional on purpose. `com.intellij.modules.jcef` does not exist as a module
+    in the 2025.3 distribution (JCEF is still part of the platform jars there),
+    and a hard dependency would make the plugin unloadable on that build. From
+    2026.2 the module does exist, the dependency resolves, and the platform ties
+    our classloader to the bundled JCEF plugin - which is what the code needs
+    there. When the module is missing, every JCEF call site fails in a guarded
+    path and the dock falls back to its Swing card.
+  -->
+  <depends optional="true">com.intellij.modules.jcef</depends>
+
+  <resource-bundle>messages.DshDockBundle</resource-bundle>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <toolWindow
+        id="DSH Dock"
+        anchor="right"
+        icon="/icons/dock.svg"
+        factoryClass="cc.futurvo.ideadock.dock.DockToolWindowFactory"/>
+
+    <projectConfigurable
+        instance="cc.futurvo.ideadock.ui.DshDockConfigurable"
+        id="dsh.ideadock"
+        parentId="tools"
+        displayName="DSH Dock"/>
+
+    <statusBarWidgetFactory
+        id="DshDockStatus"
+        implementation="cc.futurvo.ideadock.ui.DockStatusBarWidgetFactory"/>
+
+    <notificationGroup id="DSH Dock" displayType="BALLOON"/>
+  </extensions>
+
+  <actions>
+    <action id="DshDock.Open"
+            class="cc.futurvo.ideadock.ui.DshDockOpenAction"
+            text="Open DSH Dock"
+            description="Show the DSH session in the DSH Dock tool window"
+            icon="/icons/dock.svg">
+      <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt D"/>
+      <keyboard-shortcut keymap="Mac OS X" first-keystroke="meta alt D"/>
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+    </action>
+
+    <action id="DshDock.Reload"
+            class="cc.futurvo.ideadock.ui.DshDockReloadAction"
+            text="Reload DSH Dock"
+            description="Probe QuickDock again and re-render the dock">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+    </action>
+
+    <action id="DshDock.Retry"
+            class="cc.futurvo.ideadock.ui.DshDockRetryAction"
+            text="Retry Connecting to QuickDock"
+            description="Probe the QuickDock listener again"/>
+
+    <action id="DshDock.OpenInBrowser"
+            class="cc.futurvo.ideadock.ui.DshDockOpenInBrowserAction"
+            text="Open DSH in the Browser"
+            description="Open QuickDock's shell page in the system browser"/>
+
+    <action id="DshDock.StartDsh"
+            class="cc.futurvo.ideadock.ui.DshDockStartDshAction"
+            text="Start DSH"
+            description="Start DSH in the Run tool window and wait for QuickDock"/>
+
+    <action id="DshDock.UseDetectedPort"
+            class="cc.futurvo.ideadock.ui.DshDockUseDetectedPortAction"
+            text="Use Port Detected from QuickDock"
+            description="Adopt the port recorded in QuickDock's own configuration"/>
+
+    <action id="DshDock.OpenSettings"
+            class="cc.futurvo.ideadock.ui.DshDockOpenSettingsAction"
+            text="DSH Dock Settings"
+            description="Open the DSH Dock settings page">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+    </action>
+
+    <action id="DshDock.OpenLog"
+            class="cc.futurvo.ideadock.ui.DshDockOpenLogAction"
+            text="Open QuickDock Log"
+            description="Reveal QuickDock's host.log"/>
+
+    <action id="DshDock.OpenDiff"
+            class="cc.futurvo.ideadock.ui.DshDockOpenDiffAction"
+            text="Review Active File Changes"
+            description="Diff the active file against the review baseline"/>
+
+    <action id="DshDock.ToggleTools"
+            class="cc.futurvo.ideadock.ui.DshDockToggleToolsAction"
+            text="Enable Editor Tools for DSH"
+            description="Start or stop the editor MCP server DSH mounts tools from"/>
+
+    <action id="DshDock.ToggleReview"
+            class="cc.futurvo.ideadock.ui.DshDockToggleReviewAction"
+            text="Automatic Review of DSH Edits"
+            description="Turn the review notifications for files DSH changes on or off"/>
+  </actions>
+</idea-plugin>
