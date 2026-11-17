@@ -14,14 +14,19 @@ import java.time.Duration
  * Registering the editor's MCP server with QuickDock, and reading back what DSH
  * mounted.
  *
- * Three calls on QuickDock's own listener, exactly as `docs/02-contracts.md` §5
- * spells them out. A registration lives in DSH's memory, so the heartbeat in
- * [com.deepseek.dsh.idea.lifecycle.DockService] is the whole lifecycle: when DSH
+ * Three calls on QuickDock's own listener. A registration lives in DSH's memory, so
+ * the heartbeat in [com.deepseek.dsh.idea.lifecycle.DockService] is the whole lifecycle: when DSH
  * restarts, the next beat re-registers and the tools come back.
  */
 object Pairing {
 
-    /** Namespace of the tools DSH mounts from this server (`mcp__intellij__*`). */
+    /**
+     * The tool namespace this plugin registered under before it became per-IDE.
+     *
+     * Kept as the fallback name (and for the one-time cleanup of a legacy
+     * registration); the live name is [cc.futurvo.ideadock.editor.IdeIdentity.slug],
+     * so an IDEA dock is `mcp__idea__*`, a CLion dock `mcp__clion__*`, and so on.
+     */
     const val TOOL_NAMESPACE: String = "intellij"
 
     /** Default loopback port for the editor's MCP server. */
@@ -89,6 +94,61 @@ object Pairing {
         val replaced: Boolean,
         val sessions: List<BridgeSession>
     )
+
+    /**
+     * What one dock should show, as `GET /quickdock/api/dock-target?dock=` spells it.
+     *
+     * `seq` moves when the Dock button binds another session; `reloadSeq` when the
+     * user asks for a reload in the main window. `workspace.matches` is false when
+     * the session on screen works outside every directory this dock registered,
+     * which is what a client warns about.
+     */
+    data class DockTarget(
+        val sessionId: String,
+        val seq: Long,
+        val reloadSeq: Long,
+        val workspaceMatches: Boolean?
+    )
+
+    /** Parse a `dock-target` body. */
+    fun dockTarget(body: Map<String, Any?>?): DockTarget {
+        val workspace = Json.obj(body, "workspace")
+        return DockTarget(
+            sessionId = Json.str(body, "sessionId").orEmpty(),
+            seq = Json.num(body, "seq") ?: 0,
+            reloadSeq = Json.num(body, "reloadSeq") ?: 0,
+            workspaceMatches = workspace?.let { Json.bool(it, "matches") }
+        )
+    }
+
+    /** One MCP server a dock published for a folder, with its live mount state. */
+    data class McpServerInfo(
+        val name: String,
+        val url: String?,
+        val version: String?,
+        val tools: List<String>,
+        /** Sessions DSH currently mounts this server in; 0 = published but not mounted. */
+        val mountedSessions: Int
+    )
+
+    /** The `mcp-servers` answer: what the docks in one folder serve. */
+    data class McpServers(val workspace: String, val servers: List<McpServerInfo>)
+
+    /** Parse the `mcp-servers` body (the shell page renders the same fields). */
+    fun mcpServers(body: Map<String, Any?>?): McpServers {
+        val servers = Json.arr(body, "servers").orEmpty().mapNotNull { raw ->
+            val server = raw as? Map<String, Any?> ?: return@mapNotNull null
+            val mounted = Json.obj(server, "mounted")
+            McpServerInfo(
+                name = Json.str(server, "name").orEmpty().ifBlank { "mcp" },
+                url = Json.str(server, "url"),
+                version = Json.str(server, "version"),
+                tools = Json.stringList(server, "tools").orEmpty(),
+                mountedSessions = (mounted?.let { Json.num(it, "sessions") } ?: 0L).toInt()
+            )
+        }
+        return McpServers(Json.str(body, "workspace").orEmpty(), servers)
+    }
 
     /** One call to the dock, reduced to what a caller needs to decide next. */
     data class DockAnswer<T>(
@@ -202,7 +262,112 @@ class PairingClient(
         )
     }
 
+    /**
+     * The app as a document the dock can load itself.
+     *
+     * The shell page is the normal entry, but an IDE whose embedded browser
+     * cannot commit input-method text into a subframe has to make the app the
+     * top-level document instead; this is the URL for that. A dock that predates
+     * the route answers 404, which the caller reads as "keep the shell page".
+     */
+    fun appUrl(port: Int, timeoutMs: Long = 3_000): Pairing.DockAnswer<String> {
+        val answer = request(port, "app-url", "GET", null, null, timeoutMs)
+        val url = answer.body?.let { Json.str(it, "url") }?.takeIf { it.isNotBlank() }
+        return Pairing.DockAnswer(url != null && answer.ok, answer.status, body = url, error = answer.error)
+    }
+
+    /** Which session this dock should show, and whether the user asked for a reload. */
+    fun dockTarget(port: Int, dockId: String, timeoutMs: Long = 3_000): Pairing.DockAnswer<Pairing.DockTarget> {
+        val query = if (dockId.isBlank()) null else mapOf("dock" to dockId)
+        val answer = request(port, "dock-target", "GET", null, query, timeoutMs)
+        return Pairing.DockAnswer(
+            answer.ok, answer.status,
+            body = Pairing.dockTarget(answer.body),
+            error = answer.error
+        )
+    }
+
+    /**
+     * Bind this dock to the session it shows.
+     *
+     * The Host computes `dock-target.workspace.matches` - the "this session works
+     * outside the folder this window edits" warning - from the dock's binding, and
+     * a binding is in-memory: it is gone when the Host restarts. The framed shell
+     * page binds from `quickdock:session`; with the app top-level the plugin is the
+     * shell, so it does the same, quietly (a report never summons a window).
+     */
+    fun bind(port: Int, dockId: String, sessionId: String, timeoutMs: Long = 3_000): Pairing.DockAnswer<Boolean> {
+        val query = if (dockId.isBlank()) null else mapOf("dock" to dockId)
+        val body = linkedMapOf<String, Any?>("sessionId" to sessionId, "quiet" to true)
+        val answer = request(port, "bind", "POST", body, query, timeoutMs)
+        return Pairing.DockAnswer(answer.ok, answer.status, body = answer.ok, error = answer.error)
+    }
+
+    /** Ask the main DSH window to show one session (`POST /quickdock/api/handoff`). */
+    fun handoff(port: Int, sessionId: String, timeoutMs: Long = 3_000): Pairing.DockAnswer<Boolean> {
+        val answer = request(port, "handoff", "POST", linkedMapOf("sessionId" to sessionId), null, timeoutMs)
+        return Pairing.DockAnswer(
+            answer.ok, answer.status,
+            body = answer.body?.let { Json.bool(it, "ok") } ?: false,
+            error = answer.error
+        )
+    }
+
+    /**
+     * Register (or refresh) this dock's context.
+     *
+     * The shell page used to POST this on load. With the app as the document there
+     * is no shell page, so the plugin does it: it is what the DSH-side dock picker
+     * lists, what names the dock `type` (`intellij`) and what turn attribution
+     * hangs off.
+     */
+    fun registerDockContext(
+        port: Int,
+        id: String,
+        type: String = QuickDockUrls.IDE_VIEW,
+        workspaceFolders: List<String> = emptyList(),
+        client: String = "IntelliJ Platform",
+        timeoutMs: Long = 3_000
+    ): Pairing.DockAnswer<Boolean> {
+        val folders = workspaceFolders.filter { it.isNotBlank() }
+        val body = linkedMapOf<String, Any?>(
+            "id" to id,
+            "type" to type,
+            "client" to linkedMapOf("name" to client)
+        )
+        if (folders.isNotEmpty()) {
+            body["workspace"] = linkedMapOf("path" to folders.first(), "paths" to folders)
+        }
+        val answer = request(port, "dock-context", "POST", body, null, timeoutMs)
+        return Pairing.DockAnswer(
+            answer.ok, answer.status,
+            body = answer.body?.let { Json.obj(it, "dock") != null } ?: false,
+            error = answer.error
+        )
+    }
+
     /** What DSH currently mounts for one workspace directory. */
+    /**
+     * What the docks in one folder published: name, url, build, tool names and
+     * whether the bridge has them mounted. Read-only - it never mounts anything.
+     *
+     * The shell page's editor-tools panel renders this; the dock's own bar shows
+     * the same answer in Swing (`DockToolsPanel`).
+     */
+    fun mcpServers(
+        port: Int,
+        workspace: String,
+        timeoutMs: Long = 5_000
+    ): Pairing.DockAnswer<Pairing.McpServers> {
+        val query = if (workspace.isBlank()) null else mapOf("workspace" to workspace)
+        val answer = request(port, "mcp-servers", "GET", null, query, timeoutMs)
+        return Pairing.DockAnswer(
+            answer.ok, answer.status,
+            body = Pairing.mcpServers(answer.body),
+            error = answer.error
+        )
+    }
+
     fun list(
         port: Int,
         workspace: String,

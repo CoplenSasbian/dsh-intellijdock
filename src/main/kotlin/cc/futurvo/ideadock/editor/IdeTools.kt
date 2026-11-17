@@ -67,18 +67,24 @@ object IdeTools {
     private const val READ_TIMEOUT_MS = 5_000L
 
     /** Every tool, read-only ones first. */
-    fun build(project: Project, log: (String) -> Unit, write: Boolean): List<McpTool> {
+    fun build(
+        project: Project,
+        log: (String) -> Unit,
+        write: Boolean,
+        /** Tool-name prefix: the IDE's slug (`idea`, `clion`, …). */
+        ns: String = IdeIdentity.slug
+    ): List<McpTool> {
         val tools = ArrayList<McpTool>(18)
-        tools += readTools(project, log)
-        if (write) tools += writeTools(project, log)
+        tools += readTools(project, log, ns)
+        if (write) tools += writeTools(project, log, ns)
         return tools
     }
 
     /* --------------------------------- read tools ------------------------------ */
 
-    private fun readTools(project: Project, log: (String) -> Unit): List<McpTool> = listOf(
+    private fun readTools(project: Project, log: (String) -> Unit, ns: String): List<McpTool> = listOf(
         tool(
-            name = "intellij_workspace_folders",
+            name = "${ns}_workspace_folders",
             description = "List the IDE project's content roots and the active editor (path, file type). " +
                 "Use it to learn which project the user is in.",
             schema = noArguments()
@@ -105,7 +111,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_selection",
+            name = "${ns}_selection",
             description = "The active editor: file, file type, cursor position and the selected text " +
                 "(truncated at 4000 characters). An empty selection means the caret position alone.",
             schema = noArguments()
@@ -140,7 +146,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_read_file",
+            name = "${ns}_read_file",
             description = "Read an editor file, including unsaved changes. Optional 1-based line range. " +
                 "Truncated at 2000 lines or 256 KB.",
             schema = schema(
@@ -189,7 +195,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_symbols",
+            name = "${ns}_symbols",
             description = "The document outline from the IDE's PSI: named elements with kind and line, " +
                 "at most 3 levels deep and 200 nodes.",
             schema = schema(
@@ -217,7 +223,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_list_files",
+            name = "${ns}_list_files",
             description = "List project files by glob (for example **/*.kt). Use it to learn the tree " +
                 "before reading specific files.",
             schema = schema(
@@ -259,7 +265,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_search",
+            name = "${ns}_search",
             description = "Search the project text and return matching lines: path, line, column and a short " +
                 "preview. Pass include/exclude globs to narrow it.",
             schema = schema(
@@ -331,7 +337,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_diagnostics",
+            name = "${ns}_diagnostics",
             description = "Errors and warnings the IDE's analysis attached to files. Defaults to the active " +
                 "file; pass path or scope \"workspace\" for more. Returns counts and at most 200 items.",
             schema = schema(
@@ -402,7 +408,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_definitions",
+            name = "${ns}_definitions",
             description = "Where is this symbol defined? Resolves the reference at a position and returns the " +
                 "locations (path, line, column). Defaults to the active editor caret.",
             schema = schema(
@@ -433,7 +439,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_references",
+            name = "${ns}_references",
             description = "Every place this symbol is used. Defaults to the active editor caret.",
             schema = schema(
                 linkedMapOf(
@@ -465,7 +471,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_hover",
+            name = "${ns}_hover",
             description = "The documentation the IDE shows for the symbol at a position (plain text, bounded). " +
                 "Defaults to the active editor caret.",
             schema = schema(
@@ -497,7 +503,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_code_actions",
+            name = "${ns}_code_actions",
             description = "Quick fixes and intentions available at a position or selection. Lists titles only; " +
                 "applying one is a separate, deliberate step.",
             schema = schema(
@@ -538,7 +544,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_reveal",
+            name = "${ns}_reveal",
             description = "Open a file in the editor and put the caret on a line (no diff). Use it when the user " +
                 "should look at code rather than at a change.",
             schema = schema(
@@ -558,7 +564,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_open_diff",
+            name = "${ns}_open_diff",
             description = "Open a change in the IDE's diff editor for review. Pass original with the text the file " +
                 "had before your change; without it the cached review baseline is used. Nothing is written.",
             schema = schema(
@@ -587,9 +593,9 @@ object IdeTools {
 
     /* -------------------------------- write tools ------------------------------ */
 
-    private fun writeTools(project: Project, log: (String) -> Unit): List<McpTool> = listOf(
+    private fun writeTools(project: Project, log: (String) -> Unit, ns: String): List<McpTool> = listOf(
         tool(
-            name = "intellij_apply_edit",
+            name = "${ns}_apply_edit",
             description = "Replace a range (or the whole file) with new text through a write command: the buffer " +
                 "becomes unsaved (Ctrl+Z undoes it) and the change opens in a diff tab. Nothing is saved unless " +
                 "save is true.",
@@ -653,7 +659,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_save_file",
+            name = "${ns}_save_file",
             description = "Save one file (by absolute path). Omit the path to save every unsaved document.",
             schema = schema(linkedMapOf("path" to stringProperty("Absolute file path. Omit to save every dirty document.")))
         ) { args ->
@@ -690,7 +696,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_run_task",
+            name = "${ns}_run_task",
             description = "List the project's run configurations, or run one by name. The output appears in the " +
                 "Run tool window, not in this answer.",
             schema = schema(linkedMapOf("label" to stringProperty("Run configuration name. Omit to list them.")))
@@ -718,7 +724,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_terminal_run",
+            name = "${ns}_terminal_run",
             description = "Run a command line in the IDE's Run tool window (named DSH Agent). The output stays " +
                 "there; this answer only says it started.",
             schema = schema(
@@ -737,7 +743,7 @@ object IdeTools {
         },
 
         tool(
-            name = "intellij_start_debug",
+            name = "${ns}_start_debug",
             description = "List the run configurations, or debug one by name. Debugging happens in the IDE; this " +
                 "answer only says it started.",
             schema = schema(linkedMapOf("name" to stringProperty("Run configuration name. Omit to list them.")))

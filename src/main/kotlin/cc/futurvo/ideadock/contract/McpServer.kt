@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * workspace MCP bridge, and sessions whose working directory is inside the
  * registered folder mount `mcp__intellij__*`.
  *
- * The HTTP surface follows `docs/04-mcp-host.md` §2 exactly:
+ * The HTTP surface:
  *
  * ```
  * GET    /health   no auth, {ok, version, tools}

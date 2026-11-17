@@ -1,6 +1,8 @@
 package cc.futurvo.ideadock.dock
 
-import cc.futurvo.ideadock.ui.titleActions
+import cc.futurvo.ideadock.ui.DshDockOpenInBrowserAction
+import cc.futurvo.ideadock.ui.DshDockReloadAction
+import cc.futurvo.ideadock.ui.DshDockToggleToolsAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
@@ -25,8 +27,14 @@ class DockToolWindowFactory : ToolWindowFactory {
         content.isCloseable = false
         content.setDisposer(panel)
         toolWindow.contentManager.addContent(content)
-        // The three buttons users reach for most; the dock's own title bar also
-        // carries the tools switch once QuickDock reports a bridge.
-        toolWindow.setTitleActions(titleActions(project))
+        // The three actions users reach for most, each with a real icon: without
+        // an `Icon` the platform draws its placeholder glyph, and three identical
+        // circles read as broken. The tools switch changes its icon with the
+        // state (puzzle -> green check), since a header shows icons only.
+        toolWindow.setTitleActions(listOf(
+            DshDockToggleToolsAction(),
+            DshDockReloadAction(),
+            DshDockOpenInBrowserAction()
+        ))
     }
 }

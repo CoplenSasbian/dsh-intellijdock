@@ -16,9 +16,9 @@ import java.net.http.HttpResponse
  * The MCP server, exercised over real HTTP on loopback.
  *
  * The surface here is the contract DSH's bridge depends on, so the test asserts
- * the status codes and headers exactly (`docs/04-mcp-host.md` §2), not just the
- * happy path: 401, 405 with `Allow`, 204, 404, batches, notifications, and a tool
- * that throws becoming `isError: true` instead of a protocol error.
+ * the status codes and headers exactly, not just the happy path: 401, 405 with
+ * `Allow`, 204, 404, batches, notifications, and a tool that throws becoming
+ * `isError: true` instead of a protocol error.
  */
 class McpServerTest {
 

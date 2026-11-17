@@ -13,6 +13,14 @@ data class DockView(
     val port: Int,
     /** The shell page URL, already carrying view/dock/mcp/workspace. */
     val pageUrl: String = "",
+    /**
+     * Load [pageUrl] as the document itself instead of framing it.
+     *
+     * True when the Host answered `app-url`: the JCEF browser then shows the DSH
+     * app directly, because it cannot commit input-method text into a subframe.
+     * The plugin brings the chrome (a Swing bar) in that mode.
+     */
+    val topLevel: Boolean = false,
     /** Whether the editor tools are on, which the title bar's switch mirrors. */
     val mcpOn: Boolean = false,
     /** The tooltip text the switch shows. */

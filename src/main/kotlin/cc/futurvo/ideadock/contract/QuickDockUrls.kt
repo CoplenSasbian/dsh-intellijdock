@@ -3,24 +3,41 @@ package cc.futurvo.ideadock.contract
 /**
  * The URLs of QuickDock's loopback listener.
  *
- * `view` is QuickDock's client discriminator and it decides three things at once
- * (bullet 2/3 of `docs/02-contracts.md`): whether the desktop window chrome is
+ * `view` is QuickDock's client discriminator and it decides three things at once:
+ * whether the desktop window chrome is
  * trimmed, whether the app is served through the Host's app-proxy, and what the
- * embedded app thinks its host is. `vscode` is the only value today that both
- * trims the chrome and routes open-file clicks back to the host, so an IntelliJ
- * client has to ask for `vscode` until QuickDock grows an `intellij` view.
+ * embedded app thinks its host is. `intellij` is the name this client asks for;
+ * a QuickDock build that predates it (no `intellij` in `meta.views`) still knows
+ * `vscode`, which trims the chrome and routes open-file clicks the same way - the
+ * only loss is the `type` a dock registers under.
  */
 object QuickDockUrls {
 
     const val HOST: String = "127.0.0.1"
 
     /** The view name this client asks for. */
-    const val IDE_VIEW: String = "vscode"
+    const val IDE_VIEW: String = "intellij"
+
+    /** The editor view an older QuickDock build knows (same chrome, same transport). */
+    const val LEGACY_IDE_VIEW: String = "vscode"
 
     /** The view that keeps the trimmed bar but embeds the app directly (a browser tab). */
     const val BROWSER_VIEW: String = "browser"
 
     fun baseUrl(port: Int): String = "http://$HOST:$port"
+
+    /**
+     * The view to request from the QuickDock that answered.
+     *
+     * Negotiation happens at probe time: `meta.views` is the Host's own whitelist,
+     * and a name missing there is a 400, so falling back is not optional. An
+     * unknown or older manifest advertises no views at all, which also means
+     * `vscode`.
+     */
+    fun viewFor(meta: QuickDockMeta?): String {
+        val views = meta?.views.orEmpty()
+        return if (views.contains(IDE_VIEW)) IDE_VIEW else LEGACY_IDE_VIEW
+    }
 
     /** The shell page for one view, without the dock-specific parameters. */
     fun pageUrl(port: Int, view: String = IDE_VIEW): String = "${baseUrl(port)}/quickdock?view=$view"

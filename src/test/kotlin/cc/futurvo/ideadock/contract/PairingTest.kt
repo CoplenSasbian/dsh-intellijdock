@@ -27,10 +27,18 @@ class PairingTest {
 
     /** Every request the client made, as `action` + body. */
     private val calls = mutableListOf<Pair<String, String>>()
+    /** Every request the client made, as `action` + raw query string. */
+    private val queries = mutableListOf<Pair<String, String?>>()
 
     private var listBody = """{"ok":true,"workspaces":[]}"""
     private var registerStatus = 200
     private var registerBody = """{"ok":true,"registered":{"name":"intellij"},"sessions":[]} """
+    private var appUrlBody = """{"ok":true,"url":"http://127.0.0.1:57000/?dock=1"}"""
+    private var targetBody =
+        """{"sessionId":"s-1","seq":2,"reloadSeq":1,"workspace":{"dock":"C:\\work","session":"C:\\other","matches":false}}"""
+    private var serversBody = """{"ok":true,"workspace":"C:\\work","servers":[
+        {"name":"clion","url":"http://127.0.0.1:47920/mcp","version":"0.1.0",
+         "tools":["clion_read_file","clion_selection"],"mounted":{"sessions":3}}]}"""
 
     @Before
     fun setUp() {
@@ -39,10 +47,17 @@ class PairingTest {
             val action = exchange.requestURI.path.substringAfterLast('/')
             val body = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
             calls += action to body
+            queries += action to exchange.requestURI.query
             val (status, payload) = when (action) {
                 "mcp-list" -> 200 to listBody
                 "mcp-register" -> registerStatus to registerBody
                 "mcp-unregister" -> 200 to """{"ok":true,"removed":["intellij"]}"""
+                "app-url" -> 200 to appUrlBody
+                "dock-target" -> 200 to targetBody
+                "handoff" -> 200 to """{"ok":true,"seq":1}"""
+                "bind" -> 200 to """{"ok":true,"dock":"idea-1"}"""
+                "dock-context" -> 200 to """{"ok":true,"dock":{"id":"idea-1","type":"intellij"}}"""
+                "mcp-servers" -> 200 to serversBody
                 else -> 404 to """{"error":"not found"}"""
             }
             val bytes = payload.toByteArray(Charsets.UTF_8)
@@ -189,5 +204,77 @@ class PairingTest {
         assertFalse(answer.ok)
         assertEquals(0, answer.status)
         assertNotNull(answer.error)
+    }
+
+    /* ---- the top-level app mode: app-url, dock-target, handoff ---- */
+
+    @Test
+    fun `app-url returns the proxy-served app document`() {
+        val answer = client().appUrl(port)
+        assertTrue(answer.ok)
+        assertEquals("http://127.0.0.1:57000/?dock=1", answer.body)
+    }
+
+    @Test
+    fun `a build without the app-url route answers null, so the shell page stays`() {
+        appUrlBody = """{"error":"not found"}"""
+        val answer = client().appUrl(port)
+        assertFalse(answer.ok)
+        assertNull(answer.body)
+    }
+
+    @Test
+    fun `dock-target carries the session, both sequences and the workspace verdict`() {
+        val answer = client().dockTarget(port, "idea-1")
+        assertTrue(answer.ok)
+        val target = answer.body!!
+        assertEquals("s-1", target.sessionId)
+        assertEquals(2L, target.seq)
+        assertEquals(1L, target.reloadSeq)
+        assertEquals(false, target.workspaceMatches)
+        assertEquals("dock-target", calls.last().first)
+    }
+
+    @Test
+    fun `binding a session targets this dock and stays quiet`() {
+        assertTrue(client().bind(port, "idea-1", "s-1").ok)
+        assertEquals("bind", calls.last().first)
+        assertEquals("dock=idea-1", queries.last().second)
+        val body = Json.parseObject(calls.last().second)!!
+        assertEquals("s-1", body["sessionId"])
+        // A report from the dock must never summon a window (the shell's rule).
+        assertEquals(true, body["quiet"])
+    }
+
+    @Test
+    fun `handoff posts the session the main window should show`() {
+        assertTrue(client().handoff(port, "s-1").ok)
+        val body = Json.parseObject(calls.last().second)!!
+        assertEquals("s-1", body["sessionId"])
+    }
+
+    @Test
+    fun `the dock registers its own context, naming the JetBrains view and its roots`() {
+        assertTrue(client().registerDockContext(port, "idea-1", workspaceFolders = listOf("C:\\work", "C:\\other")).ok)
+        val body = Json.parseObject(calls.last().second)!!
+        assertEquals("idea-1", body["id"])
+        assertEquals("intellij", body["type"])
+        val workspace = Json.obj(body, "workspace")!!
+        assertEquals("C:\\work", workspace["path"])
+        assertEquals(listOf("C:\\work", "C:\\other"), workspace["paths"])
+    }
+
+    @Test
+    fun `mcp-servers names the published tools and their mount state`() {
+        val answer = client().mcpServers(port, "C:\\work")
+        assertTrue(answer.ok)
+        val servers = answer.body!!.servers
+        assertEquals(1, servers.size)
+        val server = servers[0]
+        assertEquals("clion", server.name)
+        assertEquals("0.1.0", server.version)
+        assertEquals(3, server.mountedSessions)
+        assertEquals(listOf("clion_read_file", "clion_selection"), server.tools)
+        assertEquals("mcp-servers", calls.last().first)
     }
 }

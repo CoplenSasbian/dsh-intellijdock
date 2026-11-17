@@ -392,8 +392,14 @@ ${css(
     private fun button(action: String, label: String, primary: Boolean, actionCall: String, ghost: Boolean = false): String {
         val css = if (primary) "btn primary" else if (ghost) "btn ghost" else "btn"
         // The injected query expression reads a variable named `action`.
-        val call = actionCall.replace("\$action", jsString(action))
-        return "<a class=\"$css\" role=\"button\" href=\"#\" onclick=\"var action=${jsString(action)}; $call; return false;\">${esc(label)}</a>"
+        //
+        // The handler goes into a double-quoted attribute, so every quote in it
+        // has to be an entity: `jsString` yields `"startDsh"`, and dropping that
+        // raw into `onclick="..."` closes the attribute at the first quote,
+        // leaving the browser with the invalid handler `var action=` - a button
+        // that looks right and does nothing.
+        val handler = "var action=${jsString(action)}; $actionCall; return false;"
+        return "<a class=\"$css\" role=\"button\" href=\"#\" onclick=\"${esc(handler)}\">${esc(label)}</a>"
     }
 
     /** `http://127.0.0.1:47910` from any URL on the dock's listener. */

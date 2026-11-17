@@ -11,7 +11,9 @@ import cc.futurvo.ideadock.contract.QuickDockProbe
 import cc.futurvo.ideadock.contract.QuickDockUrls
 import cc.futurvo.ideadock.dock.DockPage
 import cc.futurvo.ideadock.dock.DockPanel
+import cc.futurvo.ideadock.dock.DockToolsPanel
 import cc.futurvo.ideadock.dock.DockView
+import cc.futurvo.ideadock.editor.IdeIdentity
 import cc.futurvo.ideadock.editor.IdeTools
 import cc.futurvo.ideadock.editor.ReviewDiff
 import cc.futurvo.ideadock.ui.DshDockBundle
@@ -38,7 +40,9 @@ import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.util.io.FileUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.wm.ToolWindowManager
@@ -53,7 +57,7 @@ import java.util.concurrent.TimeUnit
  * the editor MCP server, its pairing with QuickDock, the review watcher, and the
  * actions the dock page and the menus call.
  *
- * Threading is the part that matters here (see `docs/06-platform-rules.md` §1):
+ * Threading is the part that matters here:
  * every network call, file read and process launch happens on this service's own
  * small thread pool - never on the EDT and never on the platform's shared pool,
  * which is an unbounded queue that silently stops draining during indexing.
@@ -93,6 +97,23 @@ class DockService(private val project: Project) : Disposable {
 
     private val probe = QuickDockProbe()
     private val pairing = PairingClient()
+    /** The follow beat that keeps a top-level dock on the session it is bound to. */
+    private var followBeat: java.util.concurrent.ScheduledFuture<*>? = null
+    @Volatile
+    private var followSession: String = ""
+    private var followReloadSeq: Long = -1
+    private var followWarning: Boolean? = null
+    /** The listener stopped answering (a DSH restart); rebuild when it is back. */
+    private var hostDown: Boolean = false
+    /** The session the app says it shows (`quickdock:session`), for bind/warning. */
+    @Volatile
+    private var reportedSession: String = ""
+    /** The session the Host is bound to, so a report does not re-bind every beat. */
+    @Volatile
+    private var boundSession: String = ""
+    private var warnedAboutAppUrl: Boolean = false
+    /** Debounce for "the app page died, probe again" retries. */
+    private var lastLoadErrorAt: Long = 0
 
     /** One thread does the work, one thread owns the 20-second beat. */
     private val worker: ScheduledExecutorService =
@@ -190,7 +211,9 @@ class DockService(private val project: Project) : Disposable {
     }
 
     private fun applyStatus(result: ProbeResult, info: QuickDockPorts.PortInfo) {
-        val url = if (info.port > 0) QuickDockUrls.pageUrl(info.port) else ""
+        // The tooltip shows the address the dock actually opens, not a guess: an
+        // older QuickDock only knows `vscode`.
+        val url = if (info.port > 0) QuickDockUrls.pageUrl(info.port, QuickDockUrls.viewFor(result.meta)) else ""
         val next = if (result.ok) {
             Status(
                 reachable = true,
@@ -271,8 +294,17 @@ class DockService(private val project: Project) : Disposable {
         if (this.panel === panel) this.panel = null
     }
 
-    /** Probe again and repaint the dock (the Retry button, a port move, a reload). */
-    fun reload(force: Boolean = false) {
+    /**
+     * Probe again and repaint the dock (the Retry button, a port move, a reload).
+     *
+     * @param force skip the probe cache.
+     * @param reloadDocument also fetch the app document again. In top-level mode
+     *   [DockPanel.render] keeps the document on purpose (that is where the
+     *   conversation lives), so the title bar's Reload needs this to mean what
+     *   it says: a rebuilt client bundle or a restarted app is otherwise never
+     *   re-fetched while the tool window stays open.
+     */
+    fun reload(force: Boolean = false, reloadDocument: Boolean = false) {
         worker.execute {
             safely("reload") {
                 val info = resolvePort()
@@ -281,9 +313,33 @@ class DockService(private val project: Project) : Disposable {
                 renderedPort = info.port
                 lastView = view
                 applyStatus(result, info)
-                onUi { panel?.render(view) }
+                onUi {
+                    val loadedFresh = panel?.render(view) ?: false
+                    // Reload the document only when render kept the one on screen.
+                    // Right after a DSH restart render fetches the *new* app-proxy
+                    // URL; a second reload there would race that navigation and
+                    // leave the browser on the old, dead port's error page.
+                    if (reloadDocument && !loadedFresh && view.mode == DockView.Mode.FRAME && view.topLevel) {
+                        panel?.reloadApp()
+                    }
+                }
             }
         }
+    }
+
+    /**
+     * A main-frame load failed - normally the app proxy died with the Host.
+     *
+     * Chromium's error page must not be the end state: probe again and, when the
+     * Host is up, fetch its new app URL. Debounced, because an error can fire per
+     * frame and a Host that is still starting must not be hammered.
+     */
+    fun loadFailed() {
+        val now = System.currentTimeMillis()
+        if (now - lastLoadErrorAt < 5_000) return
+        lastLoadErrorAt = now
+        log.info("dock: app page failed to load; probing again")
+        worker.schedule({ reload(force = true) }, 1, TimeUnit.SECONDS)
     }
 
     /** Reveal the tool window, and make sure it is showing current state. */
@@ -310,10 +366,35 @@ class DockService(private val project: Project) : Disposable {
             )
         }
         if (result.embeddable && info.port > 0) {
+            // `intellij` when this QuickDock lists it; an older one keeps working
+            // through `vscode` (same chrome, same app proxy, same open-file relay).
+            val view = QuickDockUrls.viewFor(result.meta)
+            if (view != QuickDockUrls.IDE_VIEW) {
+                log.info("dock: view=${QuickDockUrls.LEGACY_IDE_VIEW} (this QuickDock predates view=${QuickDockUrls.IDE_VIEW})")
+            }
+            // A JCEF browser cannot commit input-method text into a subframe, so
+            // the app is loaded as the document itself when the Host can serve it
+            // that way; the shell page stays the fallback for an older QuickDock.
+            val appUrl = appUrl(info.port)
+            if (appUrl != null) {
+                // The shell page used to register the dock context on load; with
+                // the app as the document this is the plugin's job. It is an
+                // idempotent upsert, so every build of the view may repeat it.
+                pairing.registerDockContext(info.port, dockId(), workspaceFolders = contentRoots())
+                startFollow()
+                return DockView(
+                    mode = DockView.Mode.FRAME,
+                    port = info.port,
+                    pageUrl = appUrl,
+                    topLevel = true,
+                    mcpOn = mcp != null,
+                    mcpDetail = mcpDetail()
+                )
+            }
             return DockView(
                 mode = DockView.Mode.FRAME,
                 port = info.port,
-                pageUrl = QuickDockUrls.shellUrl(info.port, dockId(), mcp != null, contentRoots()),
+                pageUrl = QuickDockUrls.shellUrl(info.port, dockId(), mcp != null, contentRoots(), view = view),
                 mcpOn = mcp != null,
                 mcpDetail = mcpDetail()
             )
@@ -589,6 +670,10 @@ class DockService(private val project: Project) : Disposable {
             startBeat()
             syncReview()
             syncMcp("start", announce)
+            // Every IDE used to register under the one name `intellij`; drop that
+            // registration so DSH does not mount both `mcp__intellij__*` and
+            // `mcp__<ide>__*` for the same workspace.
+            dropLegacyNamespace()
             pushMcpState(true, mcpDetail())
             log.info("mcp: started on ${server.url} with ${tools.size} tool(s)")
         } catch (error: Throwable) {
@@ -614,7 +699,7 @@ class DockService(private val project: Project) : Disposable {
         state.server.close()
         val port = resolvePort().port
         for (folder in state.registered.keys.toList()) {
-            val answer = pairing.unregister(port, folder, Pairing.TOOL_NAMESPACE)
+            val answer = pairing.unregister(port, folder, IdeIdentity.slug)
             if (!answer.ok) log.info("mcp: cannot unregister $folder: ${answer.error}")
         }
         state.registered.clear()
@@ -623,6 +708,17 @@ class DockService(private val project: Project) : Disposable {
         syncReview()
         pushMcpState(false, "")
         log.info("mcp: stopped")
+    }
+
+    /** Remove the pre-slug registration (`name=intellij`) for every root folder. */
+    private fun dropLegacyNamespace() {
+        if (IdeIdentity.slug == Pairing.TOOL_NAMESPACE) return
+        val port = resolvePort().port
+        if (port <= 0) return
+        for (folder in contentRoots()) {
+            val answer = pairing.unregister(port, folder, Pairing.TOOL_NAMESPACE)
+            if (answer.ok) log.info("mcp: dropped the legacy intellij registration for $folder")
+        }
     }
 
     private fun startBeat() {
@@ -655,7 +751,7 @@ class DockService(private val project: Project) : Disposable {
 
             for (folder in state.registered.keys.toList()) {
                 if (folders.any { Paths.samePath(it, folder) }) continue
-                val dropped = pairing.unregister(info.port, folder, Pairing.TOOL_NAMESPACE)
+                val dropped = pairing.unregister(info.port, folder, IdeIdentity.slug)
                 state.registered.remove(folder)
                 log.info(
                     if (dropped.ok) "mcp: unregistered $folder (folder closed)"
@@ -670,7 +766,7 @@ class DockService(private val project: Project) : Disposable {
                 val registration = Pairing.Registration(
                     workspace = folder,
                     url = state.server.url,
-                    name = Pairing.TOOL_NAMESPACE,
+                    name = IdeIdentity.slug,
                     headers = mapOf("Authorization" to "Bearer ${state.token}"),
                     version = pluginVersion(),
                     tools = state.toolNames,
@@ -784,8 +880,11 @@ class DockService(private val project: Project) : Disposable {
             folders.map { Paths.resolve(it, target) }
         }
         worker.execute {
+            val vfs = LocalFileSystem.getInstance()
             for (candidate in candidates) {
-                val file = LocalFileSystem.getInstance().findFileByPath(candidate)
+                // VFS paths are `/`-separated; the dock may send either separator,
+                // and the file may be new (the agent just wrote it): refresh first.
+                val file = vfs.refreshAndFindFileByPath(FileUtil.toSystemIndependentName(candidate))
                 if (file != null && !file.isDirectory) {
                     openInEditor(file)
                     log.info("dock: opened $candidate$detail")
@@ -959,6 +1058,177 @@ class DockService(private val project: Project) : Disposable {
         )
     }
 
+    /** Show what this dock published to DSH (the bar's list button). */
+    fun showToolsInfo(anchor: java.awt.Component) {
+        worker.execute {
+            val port = resolvePort().port
+            val folder = contentRoots().firstOrNull()
+            val answer = if (port > 0) pairing.mcpServers(port, folder.orEmpty()) else null
+            onUi {
+                val panel = DockToolsPanel.build(
+                    folder,
+                    answer?.body?.servers.orEmpty(),
+                    when {
+                        answer == null -> DshDockBundle.message("dock.info.disabled")
+                        answer.ok -> null
+                        else -> answer.error ?: DshDockBundle.message("dock.info.unknown")
+                    }
+                )
+                JBPopupFactory.getInstance()
+                    .createComponentPopupBuilder(panel, null)
+                    .setRequestFocus(false)
+                    .setResizable(false)
+                    .setMovable(false)
+                    .setCancelOnClickOutside(true)
+                    // The content carries its own fixed preferred size
+                    // (DockToolsPanel), so the popup cannot grow to the widest row.
+                    .createPopup()
+                    .showUnderneathOf(anchor)
+            }
+        }
+    }
+
+    /* ----------------------------- top-level dock ----------------------------- */
+
+    /**
+     * The app URL the Host serves, or null when this QuickDock predates the route.
+     *
+     * Asked once per view build (loopback, ~1 ms): the app proxy's origin can
+     * change when DSH restarts, and the URL carries that origin.
+     */
+    private fun appUrl(port: Int): String? {
+        val answer = pairing.appUrl(port)
+        if (answer.ok && !answer.body.isNullOrBlank()) return answer.body
+        if (answer.status == 404) {
+            log.info("dock: this QuickDock has no app-url route; using the shell page")
+            // Without the route the app stays in an iframe, where JCEF cannot
+            // commit a Chinese input method. Say so once: the fix is on the DSH
+            // side (update the dsh-quickdock plugin, then restart DSH).
+            if (!warnedAboutAppUrl) {
+                warnedAboutAppUrl = true
+                notify(
+                    NotificationType.INFORMATION,
+                    DshDockBundle.message("notify.appUrl.title"),
+                    DshDockBundle.message("notify.appUrl.text")
+                )
+            }
+        } else if (!answer.ok) {
+            log.info("dock: app-url failed (${answer.error}); using the shell page")
+        }
+        return null
+    }
+
+    /**
+     * The app reported the session it shows (`quickdock:session`).
+     *
+     * Keep the Host's binding on it: the Host computes
+     * `dock-target.workspace.matches` - the warning that this session works
+     * outside the folders this window edits - from the binding, and the binding
+     * is host memory. The framed shell page does this from the same message; with
+     * the app top-level there is no shell page, so this plugin is the shell.
+     */
+    fun dockSessionReported(sessionId: String) {
+        val clean = sessionId.trim()
+        if (clean == reportedSession) return
+        reportedSession = clean
+        if (clean.isEmpty()) return
+        // The app is already showing it: a follow beat must not navigate again.
+        followSession = clean
+        bindDockSession(clean)
+    }
+
+    /** Bind the Host to [sessionId], quietly; a failed bind is retried later. */
+    private fun bindDockSession(sessionId: String) {
+        if (sessionId.isBlank() || sessionId == boundSession) return
+        boundSession = sessionId
+        worker.execute {
+            safely("dock bind") {
+                val port = resolvePort().port
+                if (port <= 0) return@safely
+                val answer = pairing.bind(port, dockId(), sessionId)
+                if (!answer.ok) {
+                    boundSession = ""
+                    log.info("dock: could not bind $sessionId: ${answer.error}")
+                }
+            }
+        }
+    }
+
+    /** Ask the app to show the session the Dock button bound, and follow reloads. */
+    fun followNow() {
+        worker.execute { safely("dock follow") { followTarget() } }
+    }
+
+    private fun startFollow() {
+        if (followBeat != null || disposed) return
+        followBeat = worker.scheduleWithFixedDelay(
+            { safely("dock follow") { followTarget() } },
+            0, FOLLOW_MS, TimeUnit.MILLISECONDS
+        )
+    }
+
+    /**
+     * One beat of "which session should this dock show".
+     *
+     * The shell page used to do this from inside the browser; with the app
+     * top-level there is no shell page, so the plugin asks the Host directly and
+     * forwards the answer to the app (see `DockPanel.openSession`).
+     */
+    private fun followTarget() {
+        val port = resolvePort().port
+        if (port <= 0) return
+        val answer = pairing.dockTarget(port, dockId())
+        val target = answer.body
+        if (!answer.ok || target == null) {
+            hostDown = true
+            return
+        }
+        // The Host restarted: its app proxy has a new origin, so the page on
+        // screen points at a dead port. Rebuild the view to pick the new URL up.
+        if (hostDown) {
+            hostDown = false
+            log.info("dock: host is back; rebuilding the view")
+            reload(force = true)
+            return
+        }
+        // The Host forgets bindings when it restarts; the app does not re-report
+        // the session it kept showing, so restore it from the last report. Only
+        // when the Host has no target at all: a fresh, deliberate bind from the
+        // main window must win over a stale report.
+        if (target.sessionId.isBlank() && reportedSession.isNotBlank()) {
+            bindDockSession(reportedSession)
+        }
+        // The user asked for a reload in the main window: reload the app once.
+        if (followReloadSeq >= 0 && target.reloadSeq != followReloadSeq) {
+            followReloadSeq = target.reloadSeq
+            onUi { panel?.reloadApp() }
+            return
+        }
+        followReloadSeq = target.reloadSeq
+        val warning = target.workspaceMatches == false
+        if (warning != followWarning) {
+            followWarning = warning
+            onUi { panel?.setWorkspaceWarning(warning) }
+        }
+        if (target.sessionId.isNotBlank() && target.sessionId != followSession) {
+            followSession = target.sessionId
+            onUi { panel?.openSession(target.sessionId) }
+        }
+    }
+
+    /** Show this session in the main DSH window (the dock's handoff button). */
+    fun handoffToMain(sessionId: String) {
+        if (sessionId.isBlank()) return
+        worker.execute {
+            safely("dock handoff") {
+                val port = resolvePort().port
+                if (port <= 0) return@safely
+                val answer = pairing.handoff(port, sessionId)
+                if (!answer.ok) log.info("dock: handoff failed: ${answer.error}")
+            }
+        }
+    }
+
     /* -------------------------------- settings -------------------------------- */
 
     /** Called by the settings page after Apply. */
@@ -1070,6 +1340,7 @@ class DockService(private val project: Project) : Disposable {
     override fun dispose() {
         disposed = true
         statusBeat?.cancel(false)
+        followBeat?.cancel(false)
         stopBeat()
         val state = mcp
         mcp = null
@@ -1081,7 +1352,7 @@ class DockService(private val project: Project) : Disposable {
             }
             for (folder in state.registered.keys.toList()) {
                 try {
-                    pairing.unregister(port, folder, Pairing.TOOL_NAMESPACE)
+                    pairing.unregister(port, folder, IdeIdentity.slug)
                 } catch (error: Throwable) {
                     log.info("mcp: cannot unregister $folder on close: ${error.message}")
                 }
@@ -1100,6 +1371,8 @@ class DockService(private val project: Project) : Disposable {
         const val PLUGIN_ID: String = "dsh.ideadock"
         private const val PROBE_CACHE_MS: Long = 4_000
         private const val STATUS_REFRESH_SECONDS: Long = 20
+        /** How often a top-level dock asks the Host which session it should show. */
+        private const val FOLLOW_MS: Long = 1_200
         private const val MCP_BEAT_SECONDS: Long = 20
         private const val DSH_START_TIMEOUT_MS: Long = 90_000
         private const val DSH_START_POLL_MS: Long = 1_500

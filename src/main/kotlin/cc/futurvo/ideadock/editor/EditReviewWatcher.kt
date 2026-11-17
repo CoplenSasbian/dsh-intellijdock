@@ -36,8 +36,7 @@ import java.util.concurrent.TimeUnit
  *
  * Deliberately *not* opening a diff by itself: IntelliJ's diff is a normal editor
  * tab, and pulling focus out of what the user is typing is the fastest way to get
- * a plugin disabled (`docs/08-risks-milestones.md`, R3). A notification with a
- * "Review" action is the M4 design.
+ * a plugin disabled. A notification with a "Review" action is the M4 design.
  */
 class EditReviewWatcher(
     private val project: Project,

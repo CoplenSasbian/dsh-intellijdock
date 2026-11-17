@@ -36,6 +36,7 @@ class DshDockConfigurable(private val project: Project) : SearchableConfigurable
     private val mcpPortField = JBTextField()
     private val writeToolsBox = JBCheckBox(DshDockBundle.message("settings.writeTools"))
     private val reviewBox = JBCheckBox(DshDockBundle.message("settings.review"))
+    private val windowedBox = JBCheckBox(DshDockBundle.message("settings.windowed"))
     private val commandField = JBTextField()
     private val profileField = JBTextField()
     private val argsField = JBTextField()
@@ -66,6 +67,11 @@ class DshDockConfigurable(private val project: Project) : SearchableConfigurable
             .addLabeledComponent(DshDockBundle.message("settings.mcpPort"), mcpPortField)
             .addComponent(writeToolsBox)
             .addComponent(reviewBox)
+            .addComponent(windowedBox)
+            .addComponentToRightColumn(
+                com.intellij.ui.components.JBLabel(DshDockBundle.message("settings.windowed.hint"))
+                    .apply { foreground = com.intellij.util.ui.UIUtil.getLabelDisabledForeground() }
+            )
             .addLabeledComponent(DshDockBundle.message("settings.dshCommand"), commandField)
             .addLabeledComponent(DshDockBundle.message("settings.dshProfile"), profileField)
             .addLabeledComponent(DshDockBundle.message("settings.dshArgs"), argsField)
@@ -86,6 +92,7 @@ class DshDockConfigurable(private val project: Project) : SearchableConfigurable
             parsePort(mcpPortField.text, allowZero = false) != state.mcpPort ||
             writeToolsBox.isSelected != state.mcpWriteTools ||
             reviewBox.isSelected != state.reviewEdits ||
+            windowedBox.isSelected != state.jcefWindowed ||
             commandField.text.trim() != state.dshCommand ||
             profileField.text.trim() != state.dshProfile ||
             argsField.text.trim() != state.dshArgs
@@ -110,6 +117,7 @@ class DshDockConfigurable(private val project: Project) : SearchableConfigurable
         state.mcpPort = mcpPort
         state.mcpWriteTools = writeToolsBox.isSelected
         state.reviewEdits = reviewBox.isSelected
+        state.jcefWindowed = windowedBox.isSelected
         state.dshCommand = commandField.text.trim().ifBlank { "dsh" }
         state.dshProfile = profileField.text.trim()
         state.dshArgs = argsField.text.trim()
@@ -125,6 +133,7 @@ class DshDockConfigurable(private val project: Project) : SearchableConfigurable
         mcpPortField.text = state.mcpPort.toString()
         writeToolsBox.isSelected = state.mcpWriteTools
         reviewBox.isSelected = state.reviewEdits
+        windowedBox.isSelected = state.jcefWindowed
         commandField.text = state.dshCommand
         profileField.text = state.dshProfile
         argsField.text = state.dshArgs

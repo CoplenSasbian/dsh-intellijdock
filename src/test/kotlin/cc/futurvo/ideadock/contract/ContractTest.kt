@@ -161,10 +161,34 @@ class QuickDockUrlsTest {
 
     @Test
     fun `page and api urls`() {
-        assertEquals("http://127.0.0.1:47910/quickdock?view=vscode", QuickDockUrls.pageUrl(47910))
+        assertEquals("http://127.0.0.1:47910/quickdock?view=intellij", QuickDockUrls.pageUrl(47910))
         assertEquals("http://127.0.0.1:47910/quickdock?view=browser", QuickDockUrls.pageUrl(47910, QuickDockUrls.BROWSER_VIEW))
         assertEquals("http://127.0.0.1:47910/quickdock/api/meta", QuickDockUrls.metaUrl(47910))
         assertEquals("http://127.0.0.1:47910/quickdock/api/mcp-register", QuickDockUrls.dockApiUrl(47910, "mcp-register"))
+    }
+
+    /** The view is negotiated: `intellij` only for a QuickDock that lists it. */
+    private fun metaWith(views: List<String>) = QuickDockMeta(
+        name = "dsh-quickdock",
+        apiVersion = 2,
+        version = "0.6.0",
+        capabilities = listOf("app-proxy"),
+        views = views,
+        mcpBridge = null
+    )
+
+    @Test
+    fun `view negotiation prefers intellij and falls back to vscode`() {
+        assertEquals(
+            QuickDockUrls.IDE_VIEW,
+            QuickDockUrls.viewFor(metaWith(listOf("electron", "vscode", "intellij", "browser")))
+        )
+        assertEquals(
+            QuickDockUrls.LEGACY_IDE_VIEW,
+            QuickDockUrls.viewFor(metaWith(listOf("electron", "vscode", "browser")))
+        )
+        assertEquals(QuickDockUrls.LEGACY_IDE_VIEW, QuickDockUrls.viewFor(metaWith(emptyList())))
+        assertEquals(QuickDockUrls.LEGACY_IDE_VIEW, QuickDockUrls.viewFor(null))
     }
 
     @Test
@@ -175,11 +199,20 @@ class QuickDockUrlsTest {
             mcp = true,
             workspaceFolders = listOf("C:\\work\\one", "C:\\work\\two")
         )
-        assertTrue(url.startsWith("http://127.0.0.1:47910/quickdock?view=vscode"))
+        assertTrue(url.startsWith("http://127.0.0.1:47910/quickdock?view=intellij"))
         assertTrue(url.contains("dock=idea-0123456789ab"))
         assertTrue(url.contains("mcp=1"))
         assertTrue(url.contains("workspace=C%3A%5Cwork%5Cone"))
         assertTrue(url.contains("workspace=C%3A%5Cwork%5Ctwo"))
+    }
+
+    @Test
+    fun `an older quickdock gets the legacy view`() {
+        val url = QuickDockUrls.shellUrl(
+            47910, "idea-1", mcp = false, workspaceFolders = emptyList(),
+            view = QuickDockUrls.viewFor(metaWith(listOf("electron", "vscode")))
+        )
+        assertTrue(url.startsWith("http://127.0.0.1:47910/quickdock?view=vscode"))
     }
 
     @Test

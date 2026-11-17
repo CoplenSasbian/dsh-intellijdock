@@ -1,7 +1,9 @@
 package cc.futurvo.ideadock.dock
 
+import cc.futurvo.ideadock.contract.Json
 import cc.futurvo.ideadock.lifecycle.DockService
 import cc.futurvo.ideadock.ui.DshDockBundle
+import cc.futurvo.ideadock.ui.DshDockSettings
 import com.intellij.ide.ui.LafManagerListener
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -22,6 +24,7 @@ import org.cef.callback.CefCallback
 import org.cef.network.CefRequest
 import java.awt.BorderLayout
 import java.awt.CardLayout
+import java.awt.Component
 import java.awt.FlowLayout
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
@@ -46,19 +49,46 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
     private val log = Logger.getInstance(DockPanel::class.java)
     private val service: DockService = project.getService(DockService::class.java)
         ?: error("DockService is not registered for this project")
+    private val settings: DshDockSettings = DshDockSettings.getInstance(project)
 
     private var browser: JBCefBrowser? = null
+    /** The Swing component of the current browser, kept so a recreate can remove it. */
+    private var browserComponent: Component? = null
+    /** Per-browser disposable: disposing it frees that browser and its queries. */
+    private var browserDisposable: Disposable? = null
+    /** The rendering mode the current browser was created with (see JcefRendering). */
+    private var browserOffscreen: Boolean? = null
     private var toggleQuery: JBCefJSQuery? = null
     private var openQuery: JBCefJSQuery? = null
     private var actionQuery: JBCefJSQuery? = null
+    /** Carries app -> host messages when the app itself is the document. */
+    private var relayQuery: JBCefJSQuery? = null
     private var lastView: DockView? = null
     private var lafListener: Disposable? = null
+    /** The URL currently loaded as the document (top-level mode), else null. */
+    private var loadedUrl: String? = null
+    /** The session the app on screen shows, for the handoff button. */
+    private var currentSessionId: String = ""
 
     private val cards = JPanel(CardLayout())
     private var noJcefCard: JPanel? = null
 
+    /**
+     * The bar this plugin draws when the app is the document.
+     *
+     * With the app top-level there is no shell page to draw the title bar, so the
+     * four controls it owns live in Swing (see [DockToolbar]).
+     */
+    private val toolbar = DockToolbar(
+        onSidebar = { sendToApp("""{"type":"quickdock:toggle-sidebar"}""") },
+        onNewSession = { sendToApp("""{"type":"quickdock:new-session"}""") },
+        onShowTools = { anchor -> service.showToolsInfo(anchor) },
+        onHandoff = { service.handoffToMain(currentSessionId) }
+    ).apply { isVisible = false }
+
     init {
         background = com.intellij.ui.JBColor.PanelBackground
+        add(toolbar, BorderLayout.NORTH)
         add(cards, BorderLayout.CENTER)
         service.attachPanel(this)
         subscribeToTheme()
@@ -66,16 +96,31 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
 
     /* --------------------------------- render --------------------------------- */
 
-    /** Show one state; always called on the EDT. */
-    fun render(view: DockView) {
+    /**
+     * Show one state; always called on the EDT.
+     *
+     * @return true when a fresh document was requested for the browser (a
+     *   top-level navigation or a `loadHTML`), false when the same document was
+     *   kept - the title bar's Reload uses this to know whether a second reload
+     *   would race the navigation it has just started.
+     */
+    fun render(view: DockView): Boolean {
         lastView = view
         if (view.mode == DockView.Mode.NO_JCEF) {
             showNoJcefCard(view)
-            return
+            return false
+        }
+        // The rendering mode is fixed when a browser is created, so a settings
+        // flip recreates it. A plain reload keeps the same browser (and the app's
+        // state) - only a mode change must throw it away.
+        val wanted = desiredOffscreen()
+        if (browser != null && browserOffscreen != wanted) {
+            log.info("jcef: rendering mode changed, recreating the browser (offscreen=$wanted)")
+            dropBrowser()
         }
         val b = ensureBrowser() ?: run {
             showNoJcefCard(view)
-            return
+            return false
         }
         val theme = DockTheme.current()
         val lang = DshDockBundle.localeLanguage()
@@ -102,11 +147,30 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
                 actionCall = actionQuery?.inject("action").orEmpty(),
                 t = t
             )
-            DockView.Mode.NO_JCEF -> return
+            DockView.Mode.NO_JCEF -> return false
         }
+        // Top-level mode: the app is the document, the browser is not reloaded on
+        // every render (that would drop the conversation's state), and this plugin
+        // draws the chrome.
+        if (view.mode == DockView.Mode.FRAME && view.topLevel && view.pageUrl.isNotBlank()) {
+            toolbar.isVisible = true
+            (cards.layout as CardLayout).show(cards, CARD_BROWSER)
+            var loaded = false
+            if (loadedUrl != view.pageUrl) {
+                loadedUrl = view.pageUrl
+                log.info("dock: loading the app directly (${view.pageUrl})")
+                b.loadURL(view.pageUrl)
+                loaded = true
+            }
+            pushMcpState(view.mcpOn, view.mcpDetail)
+            return loaded
+        }
+        toolbar.isVisible = false
+        loadedUrl = null
         (cards.layout as CardLayout).show(cards, CARD_BROWSER)
         b.loadHTML(page.html)
         if (view.mode == DockView.Mode.FRAME) pushMcpState(view.mcpOn, view.mcpDetail)
+        return true
     }
 
     /**
@@ -118,6 +182,46 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
     fun pushMcpState(on: Boolean, detail: String) {
         val js = "if (window.dshMcpState) { window.dshMcpState($on, ${DockPage.jsString(detail)}) }"
         execute(js)
+    }
+
+    /** Ask the app to show one session (the dock the Dock button bound). */
+    fun openSession(sessionId: String) {
+        if (sessionId.isBlank() || loadedUrl == null) return
+        sendToApp("""{"type":"quickdock:open-session","sessionId":${DockPage.jsString(sessionId)}}""")
+    }
+
+    /** `dock-target.workspace.matches == false`: the tools do not reach that session. */
+    fun setWorkspaceWarning(show: Boolean) {
+        toolbar.setWorkspaceWarning(show)
+    }
+
+    /**
+     * Reload the document, keep the chrome.
+     *
+     * The app shell is the durable thing here (a rebuilt QuickDock client, a
+     * restarted DSH): reloading the top-level document goes through the URL the
+     * plugin intended, not "whatever the browser is on" - after a DSH restart the
+     * current page is the dead app-proxy port, and reloading that keeps showing
+     * `ERR_CONNECTION_REFUSED`. The proxy serves documents with `no-store`, so
+     * the page is fetched again.
+     */
+    fun reloadApp() {
+        val url = loadedUrl
+        if (url != null) {
+            try {
+                browser?.loadURL(url)
+            } catch (error: Throwable) {
+                log.debug("jcef: reload failed: ${error.message}")
+            }
+            return
+        }
+        browser?.cefBrowser?.let { cef ->
+            try {
+                cef.reloadIgnoreCache()
+            } catch (error: Throwable) {
+                log.debug("jcef: reload failed: ${error.message}")
+            }
+        }
     }
 
     /** Re-render the state that is already on screen (after a retry, a port move…). */
@@ -141,7 +245,15 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
             false
         }
         if (!supported) return null
-        val created = JBCefBrowser()
+        val offscreen = desiredOffscreen()
+        // `JcefRendering` explains the two IME problems and why the app is loaded
+        // top-level (DockView.topLevel) instead of being framed.
+        val created = createBrowser(offscreen)
+        browserOffscreen = offscreen
+        // One generation per browser: dropping it disposes the browser and every
+        // query created against it, so a mode flip cannot leak a CEF instance.
+        val generation = Disposer.newDisposable("dsh-dock-browser").also { Disposer.register(this, it) }
+        browserDisposable = generation
         // Queries first: CEF injects their entry points while loading the page.
         toggleQuery = JBCefJSQuery.create(created).also { query ->
             query.addHandler { _ ->
@@ -161,12 +273,68 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
                 null
             }
         }
-        listOfNotNull(toggleQuery, openQuery, actionQuery).forEach { Disposer.register(this, it) }
-        Disposer.register(this, created)
+        // The top-level app talks to its parent, which is itself; this query is
+        // how those messages reach the plugin (see bridgeScript).
+        relayQuery = JBCefJSQuery.create(created).also { query ->
+            query.addHandler { raw ->
+                onAppMessage(raw)
+                null
+            }
+        }
+        listOfNotNull(toggleQuery, openQuery, actionQuery, relayQuery).forEach { Disposer.register(generation, it) }
+        Disposer.register(generation, created)
         installHandlers(created)
-        cards.add(created.component, CARD_BROWSER)
+        val component = created.component
+        browserComponent = component
+        cards.add(component, CARD_BROWSER)
         browser = created
+        log.info("jcef: browser created (offscreen=$offscreen)")
         return created
+    }
+
+    /** The rendering mode to ask for right now, honouring the platform's own limit. */
+    private fun desiredOffscreen(): Boolean {
+        val global = try {
+            JBCefApp.isOffScreenRenderingModeEnabled()
+        } catch (error: Throwable) {
+            // Unknown: assume the default (OSR) and let the user turn it off.
+            true
+        }
+        return JcefRendering.offscreen(globalEnabled = global, windowed = settings.state.jcefWindowed)
+    }
+
+    /**
+     * Build the browser in the requested mode.
+     *
+     * Windowed rendering is the only mode whose IME commit works inside the
+     * dock's nested frames, but the platform may refuse it in some compositions,
+     * so a failure falls back to the default browser instead of a blank panel.
+     */
+    private fun createBrowser(offscreen: Boolean): JBCefBrowser {
+        if (offscreen) return JBCefBrowser()
+        return try {
+            JBCefBrowser.createBuilder().setOffScreenRendering(false).build()
+        } catch (error: Throwable) {
+            log.info("jcef: windowed rendering unavailable (${error.javaClass.simpleName}); using the default")
+            JBCefBrowser()
+        }
+    }
+
+    /** Tear the current browser down so the next render creates a fresh one. */
+    private fun dropBrowser() {
+        val component = browserComponent
+        val generation = browserDisposable
+        browser = null
+        browserComponent = null
+        browserDisposable = null
+        browserOffscreen = null
+        toggleQuery = null
+        openQuery = null
+        actionQuery = null
+        relayQuery = null
+        loadedUrl = null
+        if (component != null) cards.remove(component)
+        if (generation != null) Disposer.dispose(generation)
     }
 
     private fun installHandlers(b: JBCefBrowser) {
@@ -203,7 +371,15 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
 
             override fun onLoadStart(browser: CefBrowser, frame: CefFrame, transitionType: CefRequest.TransitionType) {}
 
-            override fun onLoadEnd(browser: CefBrowser, frame: CefFrame, httpStatusCode: Int) {}
+            override fun onLoadEnd(browser: CefBrowser, frame: CefFrame, httpStatusCode: Int) {
+                // Top-level mode: the document is the app itself, so the bridge
+                // the shell page used to provide has to be installed here. It runs
+                // on every load of the main frame (a reload keeps the chrome).
+                if (frame.isMain && loadedUrl != null) {
+                    execute(bridgeScript())
+                    sendToApp(contextJson())
+                }
+            }
 
             override fun onLoadError(
                 browser: CefBrowser,
@@ -213,6 +389,21 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
                 failedUrl: String
             ) {
                 log.info("jcef: $errorCode $errorText for $failedUrl")
+                // The app proxy lives and dies with the Host: after a DSH restart
+                // (or a QuickDock reload) the old origin is gone and Chromium's
+                // error page would be the end state. Rebuild the view instead,
+                // which asks the Host for the new app URL.
+                if (!frame.isMain || loadedUrl == null) return
+                when (errorCode) {
+                    CefLoadHandler.ErrorCode.ERR_CONNECTION_REFUSED,
+                    CefLoadHandler.ErrorCode.ERR_CONNECTION_RESET,
+                    CefLoadHandler.ErrorCode.ERR_CONNECTION_CLOSED,
+                    CefLoadHandler.ErrorCode.ERR_CONNECTION_ABORTED,
+                    CefLoadHandler.ErrorCode.ERR_CONNECTION_FAILED,
+                    CefLoadHandler.ErrorCode.ERR_EMPTY_RESPONSE,
+                    CefLoadHandler.ErrorCode.ERR_NAME_NOT_RESOLVED -> service.loadFailed()
+                    else -> Unit
+                }
             }
         }, cef)
     }
@@ -227,6 +418,85 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
         }
     }
 
+    /* --------------------------- app bridge (top-level) ----------------------- */
+
+    /**
+     * Install the message bridge inside the app document.
+     *
+     * With the app as the document, `window.parent` is the window itself: a
+     * `postMessage` the app sends "to its host" is a message it also receives, so
+     * the same code path works and the shell page's relay is not needed. The
+     * bridge forwards the app's messages (ready, open-file, session, title) to the
+     * plugin and exposes `__dshDockSend` for the other direction, which is how the
+     * shell page used to talk to the app.
+     */
+    private fun bridgeScript(): String {
+        val relay = relayQuery?.inject("JSON.stringify({ type: String(data.type || ''), data: data })")
+            ?: return ""
+        return """
+            (function () {
+              if (window.__dshDockBridge) return;
+              window.__dshDockBridge = true;
+              window.addEventListener('message', function (event) {
+                // Only our own messages: the app posts to `parent`, which is us.
+                if (event.source !== window) return;
+                var data = event.data || {};
+                var type = String(data.type || '');
+                if (type.indexOf('quickdock:') !== 0) return;
+                // Host -> app messages would loop back through this listener.
+                if (type === 'quickdock:context' || type === 'quickdock:open-session'
+                    || type === 'quickdock:toggle-sidebar' || type === 'quickdock:new-session') return;
+                $relay;
+              });
+              window.__dshDockSend = function (json) {
+                try { window.postMessage(JSON.parse(json), '*'); } catch (error) { }
+              };
+            })();
+        """.trimIndent()
+    }
+
+    /** The context the shell page sent on load: dock id, host, dock flag. */
+    private fun contextJson(): String = buildString {
+        append("""{"type":"quickdock:context","dock":true,"host":"intellij","id":""")
+        append(DockPage.jsString(service.dockId()))
+        append("}")
+    }
+
+    /** Post a host -> app message the way the shell page did. */
+    private fun sendToApp(json: String) {
+        if (loadedUrl == null) return
+        execute("if (window.__dshDockSend) { window.__dshDockSend(${DockPage.jsString(json)}) }")
+    }
+
+    /** One app -> host message, relayed from the injected bridge. */
+    private fun onAppMessage(raw: String) {
+        val body = Json.parseObject(raw) ?: return
+        val type = Json.str(body, "type").orEmpty()
+        val data = Json.obj(body, "data")
+        when (type) {
+            // The app can navigate now: name the dock and ask for the target.
+            "quickdock:ready" -> {
+                sendToApp(contextJson())
+                service.followNow()
+            }
+            "quickdock:open-file" -> Json.str(data, "path")?.let { service.openFileFromDock(it) }
+            "quickdock:session" -> {
+                currentSessionId = Json.str(data, "sessionId").orEmpty()
+                toolbar.setSessionOnScreen(currentSessionId)
+                // The Host warns from its binding; the app is the only thing that
+                // knows which session is on screen (dock sidebar, restored last
+                // session), so the report doubles as the bind request.
+                service.dockSessionReported(currentSessionId)
+            }
+            "quickdock:title" -> Json.str(data, "title")?.let { toolbar.setTitle(it) }
+            // The shell page used this to highlight its sidebar button and to hide
+            // the new-session shortcut while the sidebar (which has its own) is
+            // open; the Swing bar does the same.
+            "quickdock:sidebar-state" -> toolbar.setSidebarExpanded(Json.bool(data, "expanded") == true)
+            else -> Unit
+        }
+    }
+
     /* ------------------------------- fallback card ---------------------------- */
 
     /**
@@ -235,6 +505,7 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
      * a real Swing card with working buttons - never a white rectangle.
      */
     private fun showNoJcefCard(view: DockView) {
+        toolbar.isVisible = false
         var card = noJcefCard
         if (card == null) {
             card = JPanel().apply {
@@ -301,10 +572,11 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
 
     override fun dispose() {
         service.detachPanel(this)
-        browser = null
+        // The browser and the queries belong to `browserDisposable`, which the
+        // platform disposes with this panel; dropping it here frees them before
+        // the panel itself goes away.
+        dropBrowser()
         noJcefCard = null
-        // The browser and the queries were registered with this panel, so the
-        // platform disposes them right after this method returns.
     }
 
     private companion object {

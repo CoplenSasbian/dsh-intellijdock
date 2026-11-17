@@ -93,6 +93,52 @@ class DockPageTest {
     }
 
     @Test
+    fun `the offline buttons carry a valid inline handler`() {
+        val page = DockPage.offline(
+            model = DockPage.OfflineModel(
+                port = 47910,
+                pageUrl = "http://127.0.0.1:47910/quickdock?view=browser",
+                lead = "nothing answered",
+                reason = "connection refused",
+                detail = "connection refused",
+                detectedPort = 48000,
+                detectedFile = "C:\\state\\config.json",
+                detectedDiffers = true,
+                disabled = false,
+                stale = false,
+                startable = true,
+                hasLog = true,
+                stateDir = "C:\\state",
+                steps = listOf("first step")
+            ),
+            theme = theme,
+            lang = "en",
+            actionCall = "window.__action({request: '' + action})",
+            t = translate
+        ).html
+        // A raw `"` in `onclick="..."` would end the attribute right there; this
+        // regex reads it the way a browser does, so `var action=` fails below.
+        val handlers = Regex("onclick=\"([^\"]*)\"").findAll(page).map { it.groupValues[1] }.toList()
+        assertEquals(6, handlers.size)
+        assertEquals(
+            "var action=\"startDsh\"; window.__action({request: '' + action}); return false;",
+            unescapeAttribute(handlers[0])
+        )
+        assertEquals(
+            "var action=\"openLog\"; window.__action({request: '' + action}); return false;",
+            unescapeAttribute(handlers[5])
+        )
+    }
+
+    /** Undo [DockPage.esc] for an attribute value, as an HTML parser would. */
+    private fun unescapeAttribute(value: String): String = value
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+
+    @Test
     fun `a stale plugin gets no port button and no start button`() {
         val page = DockPage.offline(
             model = DockPage.OfflineModel(

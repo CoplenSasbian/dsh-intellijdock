@@ -42,7 +42,17 @@ class DshDockSettings : PersistentStateComponent<DshDockSettings.State> {
         /** Digest of the tool set DSH last mounted; a change forces one re-register. */
         var toolFingerprint: String = "",
         /** Last known good width/height, kept only so a re-open looks the same. */
-        var dockSide: String = "right"
+        var dockSide: String = "right",
+        /**
+         * Use windowed (non-OSR) rendering for the JCEF browser.
+         *
+         * On by default because the platform's off-screen rendering cannot commit
+         * a Chinese input method into the docked app's composer (the composer
+         * lives in nested iframes): candidates appear, nothing is inserted, while
+         * English typing works. Turn it off to get OSR back if windowed rendering
+         * misbehaves on a given IDE build. See `dock/JcefRendering.kt`.
+         */
+        var jcefWindowed: Boolean = true
     )
 
     private var state = State()

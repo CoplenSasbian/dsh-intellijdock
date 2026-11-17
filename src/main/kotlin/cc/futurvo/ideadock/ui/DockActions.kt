@@ -29,14 +29,22 @@ class DshDockOpenAction : AnAction() {
 }
 
 /** Re-probe and re-render. */
-class DshDockReloadAction : AnAction() {
+class DshDockReloadAction : AnAction(
+    "Reload DSH Dock",
+    "Probe QuickDock again, reload the app page and re-render the dock",
+    com.intellij.icons.AllIcons.Actions.Refresh
+) {
     override fun actionPerformed(event: AnActionEvent) {
-        withService(event) { it.reload(force = true) }
+        withService(event) { it.reload(force = true, reloadDocument = true) }
     }
 }
 
 /** Open the shell page in the system browser (the remote/Gateway fallback). */
-class DshDockOpenInBrowserAction : AnAction() {
+class DshDockOpenInBrowserAction : AnAction(
+    "Open DSH in the Browser",
+    "Open QuickDock's shell page in the system browser",
+    com.intellij.icons.AllIcons.General.Web
+) {
     override fun actionPerformed(event: AnActionEvent) {
         withService(event) { it.openInBrowser() }
     }
@@ -85,14 +93,22 @@ class DshDockOpenDiffAction : AnAction() {
 }
 
 /** Start/stop the editor MCP server; the tool window title bar shows it too. */
-class DshDockToggleToolsAction : AnAction() {
+class DshDockToggleToolsAction : AnAction(
+    DshDockBundle.message("dock.tools.tools"),
+    DshDockBundle.message("action.toggleTools.description"),
+    com.intellij.icons.AllIcons.Nodes.Plugin
+) {
 
     override fun actionPerformed(event: AnActionEvent) {
         withService(event) { it.toggleToolsFromDock() }
     }
 
     override fun update(event: AnActionEvent) {
-        val running = event.project?.let { DockService.getInstance(it).mcpRunning() } ?: false
+        val service = event.project?.let { DockService.getInstance(it) }
+        val running = service?.mcpRunning() == true
+        // In the tool window header only the icon shows, so it carries the state.
+        event.presentation.icon = if (running) com.intellij.icons.AllIcons.General.InspectionsOK
+        else com.intellij.icons.AllIcons.Nodes.Plugin
         event.presentation.text = DshDockBundle.message(
             if (running) "action.toggleTools.on" else "action.toggleTools.off"
         )
@@ -121,10 +137,3 @@ class DshDockToggleReviewAction : AnAction() {
 
     override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
 }
-
-/** Kept for the tool window's title bar: the two buttons users reach for most. */
-fun titleActions(project: Project): List<AnAction> = listOf(
-    DshDockToggleToolsAction(),
-    DshDockReloadAction(),
-    DshDockOpenInBrowserAction()
-)

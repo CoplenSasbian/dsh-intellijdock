@@ -85,7 +85,9 @@
     <action id="DshDock.OpenInBrowser"
             class="cc.futurvo.ideadock.ui.DshDockOpenInBrowserAction"
             text="Open DSH in the Browser"
-            description="Open QuickDock's shell page in the system browser"/>
+            description="Open QuickDock's shell page in the system browser">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+    </action>
 
     <action id="DshDock.StartDsh"
             class="cc.futurvo.ideadock.ui.DshDockStartDshAction"
@@ -112,16 +114,22 @@
     <action id="DshDock.OpenDiff"
             class="cc.futurvo.ideadock.ui.DshDockOpenDiffAction"
             text="Review Active File Changes"
-            description="Diff the active file against the review baseline"/>
+            description="Diff the active file against the review baseline">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+    </action>
 
     <action id="DshDock.ToggleTools"
             class="cc.futurvo.ideadock.ui.DshDockToggleToolsAction"
             text="Enable Editor Tools for DSH"
-            description="Start or stop the editor MCP server DSH mounts tools from"/>
+            description="Start or stop the editor MCP server DSH mounts tools from">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+    </action>
 
     <action id="DshDock.ToggleReview"
             class="cc.futurvo.ideadock.ui.DshDockToggleReviewAction"
             text="Automatic Review of DSH Edits"
-            description="Turn the review notifications for files DSH changes on or off"/>
+            description="Turn the review notifications for files DSH changes on or off">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+    </action>
   </actions>
 </idea-plugin>
