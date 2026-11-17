@@ -1,10 +1,6 @@
 package cc.futurvo.ideadock.editor
 
 import cc.futurvo.ideadock.contract.Paths
-import cc.futurvo.ideadock.ui.DshDockBundle
-import com.intellij.notification.NotificationAction
-import com.intellij.notification.NotificationGroupManager
-import com.intellij.notification.NotificationType
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
@@ -34,9 +30,9 @@ import java.util.concurrent.TimeUnit
  * (the listener sees those too), and only folders currently registered with DSH
  * are watched, so an unpaired IDE with a build running stays still.
  *
- * Deliberately *not* opening a diff by itself: IntelliJ's diff is a normal editor
- * tab, and pulling focus out of what the user is typing is the fastest way to get
- * a plugin disabled. A notification with a "Review" action is the M4 design.
+ * Deliberately matching the VS Code dock: a diff tab appears next to the work and
+ * focus goes back to the editor that was in front, so the review never pulls the
+ * caret out of what the user is typing.
  */
 class EditReviewWatcher(
     private val project: Project,
@@ -186,33 +182,21 @@ class EditReviewWatcher(
         offerReview(path, before)
     }
 
-    /** A notification, not a focus-stealing diff tab. */
+    /** Open the change for review, the way the VS Code dock does. */
     private fun offerReview(path: String, before: String) {
         val name = Paths.fileName(path)
         ApplicationManager.getApplication().invokeLater({
             try {
-                val notification = NotificationGroupManager.getInstance()
-                    .getNotificationGroup(NOTIFICATION_GROUP)
-                    .createNotification(
-                        DshDockBundle.message("review.notification.title", name),
-                        DshDockBundle.message("review.notification.text", path),
-                        NotificationType.INFORMATION
-                    )
-                notification.addAction(
-                    NotificationAction.createSimple(DshDockBundle.message("review.notification.review")) {
-                        ReviewDiff.open(project, path, original = before, title = name, focus = true)
-                        notification.expire()
+                val result = ReviewDiff.open(project, path, original = before, title = name, focus = false)
+                host.log(
+                    if (result.opened) {
+                        "review: opened $path (${textLengthDelta(before, path)} chars)"
+                    } else {
+                        "review: $path not opened: ${result.reason}"
                     }
                 )
-                notification.addAction(
-                    NotificationAction.createSimple(DshDockBundle.message("review.notification.ignore")) {
-                        notification.expire()
-                    }
-                )
-                notification.notify(project)
-                host.log("review: offered $path (${textLengthDelta(before, path)} chars)")
             } catch (error: Throwable) {
-                host.log("review: cannot notify about $path: ${error.message}")
+                host.log("review: cannot open $path: ${error.message}")
             }
         }, com.intellij.openapi.application.ModalityState.any())
     }
@@ -277,6 +261,5 @@ class EditReviewWatcher(
         const val MAX_FILE_BYTES: Long = 512 * 1024
         const val MAX_CACHED_FILES: Int = 4_000
         const val MAX_CACHED_BYTES: Int = 48 * 1024 * 1024
-        const val NOTIFICATION_GROUP: String = "DSH Dock"
     }
 }

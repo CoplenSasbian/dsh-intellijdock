@@ -161,6 +161,7 @@ class DockService(private val project: Project) : Disposable {
         // The status bar is the only always-on surface, so it starts the beat.
         startStatusBeat()
         if (settings.state.mcp) worker.execute { startTools(announce = false) }
+        syncReview()
         log.info("dsh-dock: service created for ${project.name}")
     }
 
@@ -588,8 +589,8 @@ class DockService(private val project: Project) : Disposable {
 
     /* --------------------------------- review --------------------------------- */
 
-    /** Whether a change made outside the IDE opens a notification. */
-    fun reviewEnabled(): Boolean = settings.state.reviewEdits && mcp != null
+    /** Whether a change made outside the IDE opens a review diff. */
+    fun reviewEnabled(): Boolean = settings.state.reviewEdits
 
     fun toggleReview() {
         settings.state.reviewEdits = !settings.state.reviewEdits
@@ -605,9 +606,9 @@ class DockService(private val project: Project) : Disposable {
         )
     }
 
-    /** Start or stop the watcher to match the setting and the pairing state. */
+    /** Start or stop the watcher to match the setting. */
     private fun syncReview() {
-        val wanted = settings.state.reviewEdits && mcp != null
+        val wanted = settings.state.reviewEdits
         if (!wanted) {
             review?.let {
                 Disposer.dispose(it)
@@ -619,7 +620,7 @@ class DockService(private val project: Project) : Disposable {
         val watcher = cc.futurvo.ideadock.editor.EditReviewWatcher(
             project = project,
             host = cc.futurvo.ideadock.editor.EditReviewWatcher.Host(
-                enabled = { settings.state.reviewEdits && mcp != null },
+                enabled = { settings.state.reviewEdits },
                 pairedFolders = { mcp?.registered?.keys?.toList().orEmpty() },
                 log = ::logLine
             )

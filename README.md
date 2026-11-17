@@ -15,8 +15,8 @@ plugin that runs inside DSH.
 - **Typing that works.** The app is loaded as the browser's top-level document instead of an
   iframe, so Chinese input methods commit normally; the title bar is drawn by the plugin.
 - **Files open in the IDE.** A file path in a tool card opens in the editor, not in the dock's
-  own preview. When DSH creates or changes a file, a review diff opens as a notification — it
-  never steals focus.
+  own preview. When DSH creates or changes a file, a review diff opens by itself — a diff tab
+  next to the work, with focus returned to your editor.
 - **Editor tools for the agent.** Thirteen read-only tools run in the IDE: workspace folders,
   selection, file contents (unsaved buffers included), diagnostics, symbols, search, list
   files by pattern, definitions and references, hover docs, code actions, reveal, and review

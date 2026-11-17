@@ -5,8 +5,11 @@ import cc.futurvo.ideadock.ui.DshDockBundle
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager
 import com.intellij.diff.requests.SimpleDiffRequest
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
@@ -72,7 +75,16 @@ object ReviewDiff {
             DshDockBundle.message("diff.before"),
             DshDockBundle.message("diff.after")
         )
+        val manager = FileEditorManager.getInstance(project)
+        val previous = manager.selectedFiles.firstOrNull()
         DiffManager.getInstance().showDiff(project, request)
+        // A review should appear next to the work, not pull the caret out of it:
+        // bring the editor that was in front back after the diff tab is created.
+        if (!focus && previous != null) {
+            ApplicationManager.getApplication().invokeLater({
+                manager.openFile(previous, true)
+            }, ModalityState.any())
+        }
         return Result(true, path, name, before = "baseline")
     }
 
