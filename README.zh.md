@@ -25,7 +25,7 @@ DSH Dock 把 DSH 自己的对话界面放在正在处理的代码旁边，同时
 - **不会只剩空白。** 连不上 DSH 时工具窗会说明端口和原因，并提供启动 DSH、重试、连接设置、
   在浏览器打开、查看 QuickDock 日志；远程开发 / Gateway 会自动降级到浏览器。
 
-## 三个项目怎么配合
+## 几个 dock 怎么配合
 
 DSH Dock for JetBrains IDEs 是同一个页面的三个编辑器 dock 之一。**它要求 DSH 安装
 [dsh-quickdock](https://github.com/CoplenSasbian/dsh-quickdock) 插件**——QuickDock 负责提供

@@ -32,7 +32,7 @@ plugin that runs inside DSH.
   reason, and offers Start DSH, Retry, connection settings, open-in-browser and the QuickDock
   log. Remote development / Gateway degrades to the browser instead of failing.
 
-## How the three fit together
+## How the docks fit together
 
 DSH Dock for JetBrains IDEs is one of three editor docks for the same page. **It requires DSH
 with the [dsh-quickdock](https://github.com/CoplenSasbian/dsh-quickdock) plugin installed** —
