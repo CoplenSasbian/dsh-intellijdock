@@ -617,8 +617,11 @@ class DockService(private val project: Project) : Disposable {
             return
         }
         if (review != null) return
+        val info = resolvePort()
+        if (info.port <= 0) return
         val watcher = cc.futurvo.ideadock.editor.EditReviewWatcher(
             project = project,
+            port = info.port,
             host = cc.futurvo.ideadock.editor.EditReviewWatcher.Host(
                 enabled = { settings.state.reviewEdits },
                 pairedFolders = { mcp?.registered?.keys?.toList().orEmpty() },

@@ -1,6 +1,7 @@
 package cc.futurvo.ideadock.editor
 
 import cc.futurvo.ideadock.contract.Paths
+import com.google.gson.JsonParser
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
@@ -8,34 +9,38 @@ import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileDocumentManagerListener
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.VirtualFileVisitor
-import com.intellij.openapi.vfs.newvfs.BulkFileListener
-import com.intellij.openapi.vfs.newvfs.events.VFileContentChangeEvent
-import com.intellij.openapi.vfs.newvfs.events.VFileCreateEvent
-import com.intellij.openapi.vfs.newvfs.events.VFileEvent
+import java.io.File
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Automatic review: notice a file DSH changed and offer a diff.
+ * Automatic review: follow the writes DSH says its own tools made, and open the
+ * before/after diff for each.
  *
- * The agent writes through the filesystem, never through the IDE, so the only
- * way to see it is the VFS listener. Two rules keep the notifications quiet, both
- * from the VS Code version: a save the IDE itself just made is never reviewed
- * (the listener sees those too), and only folders currently registered with DSH
- * are watched, so an unpaired IDE with a build running stays still.
+ * This deliberately does **not** watch the filesystem. A VFS listener sees every
+ * build, formatter and git checkout too, and a Gradle build touching a thousand
+ * files would open a thousand diffs. QuickDock's `file-events` feed only carries
+ * mutations DSH's own filesystem service observed (write, edit, patch, move,
+ * delete), which is exactly the set shown as Edit/Write tool cards.
  *
- * Deliberately matching the VS Code dock: a diff tab appears next to the work and
- * focus goes back to the editor that was in front, so the review never pulls the
- * caret out of what the user is typing.
+ * The diff opens next to the work and focus returns to the editor that was in
+ * front, matching the VS Code dock.
  */
 class EditReviewWatcher(
     private val project: Project,
+    private val port: Int,
     private val host: Host
 ) : Disposable {
 
@@ -52,75 +57,70 @@ class EditReviewWatcher(
             cc.futurvo.ideadock.contract.EditorMcpServer.daemonFactory("dsh-ideadock-review")
         )
     private val pending = ConcurrentHashMap<String, java.util.concurrent.ScheduledFuture<*>>()
-    private val savedAt = ConcurrentHashMap<String, Long>()
-    private val cachedPaths = ConcurrentHashMap.newKeySet<String>()
-    private var started = false
-    private var disposed = false
+    private val baseline = ConcurrentHashMap<String, String>()
+    private val disposed = AtomicBoolean(false)
+    private val started = AtomicBoolean(false)
+    @Volatile
+    private var cursor = -1L
+    @Volatile
+    private var noted = ""
 
-    /** Begin watching: cache a baseline, then follow every write. */
+    private val client: HttpClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(3))
+        .build()
+
+    /** Begin following the feed: cache a baseline, then poll. */
     fun start() {
-        if (started) return
-        started = true
-        val connection = project.messageBus.connect(this)
-        connection.subscribe(VirtualFileManager.VFS_CHANGES, object : BulkFileListener {
-            override fun after(events: MutableList<out VFileEvent>) {
-                for (event in events) {
-                    when (event) {
-                        is VFileContentChangeEvent -> schedule(event.file)
-                        is VFileCreateEvent -> event.file?.let { schedule(it) }
-                        else -> {}
-                    }
+        if (!started.compareAndSet(false, true)) return
+        // A save the IDE makes is the baseline the next reported write compares
+        // with, so the user's own typing is never shown as DSH's change.
+        project.messageBus.connect(this).subscribe(
+            FileDocumentManagerListener.TOPIC,
+            object : FileDocumentManagerListener {
+                override fun beforeDocumentSaving(document: Document) {
+                    val file = FileDocumentManager.getInstance().getFile(document) ?: return
+                    baseline[file.path] = document.text
                 }
             }
-        })
-        connection.subscribe(FileDocumentManagerListener.TOPIC, object : FileDocumentManagerListener {
-            override fun beforeDocumentSaving(document: Document) {
-                val file = FileDocumentManager.getInstance().getFile(document) ?: return
-                // Remember when the IDE saved, and make the saved text the new
-                // baseline so DSH's next write diffs against the user's version.
-                savedAt[file.path] = System.currentTimeMillis()
-                Baselines.put(file.path, document.text)
-            }
-        })
-        debounce.execute { cacheWorkspace() }
-        host.log("review: watching for changes DSH makes")
+        )
+        Thread({ cacheWorkspace() }, "dsh-ideadock-review-cache").apply {
+            isDaemon = true
+            start()
+        }
+        Thread({ follow() }, "dsh-ideadock-review-feed").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     override fun dispose() {
-        disposed = true
-        for (future in pending.values) future.cancel(false)
-        pending.clear()
+        disposed.set(true)
         debounce.shutdownNow()
-        cachedPaths.clear()
     }
 
-    /* -------------------------------- baseline -------------------------------- */
+    /* ------------------------------- baseline ------------------------------- */
 
-    /** Read the workspace once, so the first agent edit has something to compare with. */
     private fun cacheWorkspace() {
-        var files = 0
-        var bytes = 0
         try {
-            for (folder in hostRoots()) {
-                if (disposed) return
-                val root = com.intellij.openapi.vfs.LocalFileSystem.getInstance()
-                    .refreshAndFindFileByIoFile(java.io.File(folder)) ?: continue
-                ReadAction.run<RuntimeException> {
-                    VfsUtilCore.visitChildrenRecursively(root, object : VirtualFileVisitor<Any>() {
-                        override fun visitFile(file: VirtualFile): Boolean {
-                            if (disposed || file.isDirectory) return true
-                            if (files >= MAX_CACHED_FILES || bytes >= MAX_CACHED_BYTES) return false
-                            val path = file.path
-                            if (ReviewDecision.isIgnoredPath(relativeTo(hostRoots(), path))) return true
-                            val text = readText(file) ?: return true
-                            Baselines.put(path, text)
-                            cachedPaths += path
-                            files += 1
-                            bytes += text.length
-                            return true
+            val roots = contentRoots()
+            var files = 0
+            var bytes = 0L
+            for (root in roots) {
+                if (disposed.get() || files >= MAX_CACHED_FILES || bytes >= MAX_CACHED_BYTES) break
+                val vf = LocalFileSystem.getInstance().findFileByPath(root) ?: continue
+                VfsUtilCore.visitChildrenRecursively(vf, object : VirtualFileVisitor<Unit>() {
+                    override fun visitFile(file: VirtualFile): Boolean {
+                        if (disposed.get() || files >= MAX_CACHED_FILES || bytes >= MAX_CACHED_BYTES) {
+                            return false
                         }
-                    })
-                }
+                        if (isIgnored(file.path, roots)) return true
+                        val text = readText(file) ?: return true
+                        baseline[file.path] = text
+                        files += 1
+                        bytes += text.length
+                        return true
+                    }
+                })
             }
             host.log("review: cached $files file(s), ${bytes / 1024} KB, for automatic diffs")
         } catch (error: Throwable) {
@@ -128,88 +128,145 @@ class EditReviewWatcher(
         }
     }
 
-    /* --------------------------------- watching -------------------------------- */
+    /* --------------------------------- feed --------------------------------- */
 
-    /** Coalesce a burst of writes on one path, then review. */
-    private fun schedule(file: VirtualFile) {
-        if (disposed || !host.enabled()) return
-        if (file.isDirectory) return
-        val path = file.path
-        val relative = relativeTo(hostRoots(), path)
-        if (ReviewDecision.isIgnoredPath(relative)) return
-        pending.remove(path)?.cancel(false)
-        val future = debounce.schedule({ review(file) }, DEBOUNCE_MS, TimeUnit.MILLISECONDS)
-        pending[path] = future
+    private fun follow() {
+        var backoff = RETRY_MS
+        while (!disposed.get()) {
+            if (!host.enabled()) {
+                sleep(RETRY_MS)
+                continue
+            }
+            if (port <= 0) {
+                noteOnce("review: no QuickDock port is in effect, so DSH writes are not followed")
+                sleep(backoff)
+                backoff = minOf(30_000L, backoff * 2)
+                continue
+            }
+            try {
+                val since = if (cursor < 0) Long.MAX_VALUE else cursor
+                val request = HttpRequest.newBuilder(
+                    URI.create("http://127.0.0.1:$port/quickdock/api/file-events?since=$since&wait=$POLL_WAIT_MS")
+                )
+                    .timeout(Duration.ofMillis(POLL_WAIT_MS + 10_000))
+                    .GET()
+                    .build()
+                val response = client.send(request, HttpResponse.BodyHandlers.ofString())
+                if (disposed.get()) return
+                if (response.statusCode() != 200) {
+                    noteOnce("review: this QuickDock build does not report DSH writes (HTTP ${response.statusCode()})")
+                    sleep(backoff)
+                    backoff = minOf(30_000L, backoff * 2)
+                    continue
+                }
+                val body = JsonParser.parseString(response.body()).asJsonObject
+                val seq = body.get("seq")?.asLong ?: cursor
+                if (cursor < 0) {
+                    cursor = seq
+                    host.log("review: following DSH's reported writes from sequence $cursor")
+                    continue
+                }
+                body.getAsJsonArray("events")?.forEach { element ->
+                    val event = element.asJsonObject
+                    val path = event.get("path")?.asString ?: return@forEach
+                    val kind = event.get("kind")?.asString ?: "write"
+                    if (kind == "delete") {
+                        resolve(path)?.let { baseline.remove(it.path) }
+                    } else {
+                        schedule(path)
+                    }
+                }
+                cursor = seq
+                noted = ""
+                backoff = RETRY_MS
+            } catch (error: Throwable) {
+                if (disposed.get()) return
+                val message = error.message ?: error.javaClass.simpleName
+                if (message != noted) {
+                    noted = message
+                    host.log("review: cannot read DSH writes from QuickDock: $message")
+                }
+                sleep(backoff)
+                backoff = minOf(30_000L, backoff * 2)
+            }
+        }
     }
 
-    /** Compare the write with the cached text and offer the change. */
+    /** Coalesce a burst of writes on one path, then review. */
+    private fun schedule(reported: String) {
+        if (disposed.get() || !host.enabled()) return
+        val file = resolve(reported) ?: return
+        val roots = contentRoots()
+        if (isIgnored(file.path, roots)) return
+        pending.remove(file.path)?.cancel(false)
+        val future = debounce.schedule({ review(file) }, DEBOUNCE_MS, TimeUnit.MILLISECONDS)
+        pending[file.path] = future
+    }
+
+    /** Compare the new text with the baseline and open the diff. */
     private fun review(file: VirtualFile) {
-        if (disposed || !host.enabled()) return
-        val path = file.path
-        if (!file.isValid) return
+        if (disposed.get() || !host.enabled()) return
         val text = readText(file) ?: return
-        val before = Baselines.get(path)
-        val dirty = isDirty(path)
-        val verdict = ReviewDecision.decide(
-            ReviewDecision.Input(
-                path = path,
-                folders = hostRoots(),
-                paired = host.pairedFolders(),
-                selfSavedAt = savedAt[path],
-                dirty = dirty,
-                hasBefore = before != null,
-                bytes = text.length,
-                now = System.currentTimeMillis(),
-                selfSaveGraceMs = SELF_SAVE_GRACE_MS,
-                maxBytes = MAX_FILE_BYTES.toInt()
-            )
-        )
-        if (verdict is ReviewDecision.Verdict.Skip) {
-            // A write that lands without a baseline still becomes one, so the
-            // *next* change can be reviewed.
-            Baselines.put(path, text)
+        val before = baseline[file.path]
+        if (before == text) {
+            baseline[file.path] = text
             return
         }
         if (before == null) {
-            Baselines.put(path, text)
+            // A file DSH created after this dock opened starts empty; anything
+            // older has no honest baseline, and an empty diff would mislead.
+            host.log("review: no baseline for ${file.path}, opening it as a new file")
+        }
+        val dirty = try {
+            val document = FileDocumentManager.getInstance().getDocument(file)
+            document != null && FileDocumentManager.getInstance().isDocumentUnsaved(document)
+        } catch (error: Throwable) {
+            false
+        }
+        if (dirty) {
+            host.log("review: ${file.path} has unsaved edits; skipping")
             return
         }
-        if (before == text) {
-            Baselines.put(path, text)
-            return
-        }
-        Baselines.put(path, text)
-        offerReview(path, before)
-    }
-
-    /** Open the change for review, the way the VS Code dock does. */
-    private fun offerReview(path: String, before: String) {
-        val name = Paths.fileName(path)
+        baseline[file.path] = text
+        val name = Paths.fileName(file.path)
         ApplicationManager.getApplication().invokeLater({
             try {
-                val result = ReviewDiff.open(project, path, original = before, title = name, focus = false)
+                val result = ReviewDiff.open(
+                    project,
+                    file.path,
+                    original = before ?: "",
+                    title = name,
+                    focus = false
+                )
                 host.log(
                     if (result.opened) {
-                        "review: opened $path (${textLengthDelta(before, path)} chars)"
+                        "review: opened ${file.path} (${text.length - (before?.length ?: 0)} chars)"
                     } else {
-                        "review: $path not opened: ${result.reason}"
+                        "review: ${file.path} not opened: ${result.reason}"
                     }
                 )
             } catch (error: Throwable) {
-                host.log("review: cannot open $path: ${error.message}")
+                host.log("review: cannot open ${file.path}: ${error.message}")
             }
         }, com.intellij.openapi.application.ModalityState.any())
     }
 
-    private fun textLengthDelta(before: String, path: String): String {
-        val now = Baselines.get(path)?.length ?: before.length
-        val delta = now - before.length
-        return (if (delta >= 0) "+" else "") + delta
+    /* ------------------------------- helpers ------------------------------- */
+
+    private fun resolve(reported: String): VirtualFile? {
+        val file = if (Paths.isAbsolute(reported)) {
+            File(reported)
+        } else {
+            val roots = host.pairedFolders() + contentRoots()
+            roots.asSequence()
+                .map { File(it, reported) }
+                .firstOrNull { it.exists() }
+                ?: return null
+        }
+        return LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file)
     }
 
-    /* --------------------------------- helpers -------------------------------- */
-
-    private fun hostRoots(): List<String> = try {
+    private fun contentRoots(): List<String> = try {
         ReadAction.compute<List<String>, RuntimeException> {
             com.intellij.openapi.roots.ProjectRootManager.getInstance(project)
                 .contentRoots.mapNotNull { it.path }.filter { it.isNotBlank() }
@@ -218,48 +275,44 @@ class EditReviewWatcher(
         emptyList()
     }
 
-    private fun relativeTo(roots: List<String>, path: String): String {
-        val root = roots.firstOrNull { Paths.isInsideDirectory(path, it) } ?: return path
-        val normalisedRoot = root.replace('\\', '/').trimEnd('/')
-        val normalisedPath = path.replace('\\', '/')
-        return if (normalisedPath.length > normalisedRoot.length) {
-            normalisedPath.substring(normalisedRoot.length).trimStart('/')
-        } else {
-            normalisedPath
-        }
+    private fun isIgnored(path: String, roots: List<String>): Boolean {
+        val root = roots.firstOrNull { Paths.isInsideDirectory(path, it) } ?: return false
+        val relative = path.removePrefix(root).replace('\\', '/').trimStart('/')
+        return ReviewDecision.isIgnoredPath(relative)
     }
 
-    private fun isDirty(path: String): Boolean {
-        return try {
-            val file = com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(path) ?: return false
-            val document = FileDocumentManager.getInstance().getCachedDocument(file) ?: return false
-            FileDocumentManager.getInstance().isDocumentUnsaved(document)
-        } catch (error: Throwable) {
-            false
-        }
-    }
-
-    /** Read a text file, refusing what a diff could not show anyway. */
     private fun readText(file: VirtualFile): String? {
-        if (file.length > MAX_FILE_BYTES) return null
-        if (file.fileType.isBinary) return null
         return try {
-            VfsUtilCore.loadText(file).takeIf { it.indexOf('\u0000') < 0 }
+            if (file.isDirectory || file.length > MAX_FILE_BYTES) return null
+            val text = ReadAction.compute<String, RuntimeException> { VfsUtilCore.loadText(file) }
+            if (text.contains('\u0000')) null else text
         } catch (error: Throwable) {
             null
         }
     }
 
-    private companion object {
+    private fun noteOnce(line: String) {
+        if (noted == line) return
+        noted = line
+        host.log(line)
+    }
+
+    private fun sleep(ms: Long) {
+        try {
+            Thread.sleep(ms)
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    companion object {
         /** Writes are coalesced for this long: editors and tools write in bursts. */
         const val DEBOUNCE_MS: Long = 350
-
-        /** A save newer than this belongs to the IDE, not to DSH. */
-        const val SELF_SAVE_GRACE_MS: Long = 2_000
-
         /** Files above this size are never cached or diffed. */
         const val MAX_FILE_BYTES: Long = 512 * 1024
         const val MAX_CACHED_FILES: Int = 4_000
-        const val MAX_CACHED_BYTES: Int = 48 * 1024 * 1024
+        const val MAX_CACHED_BYTES: Long = 48L * 1024 * 1024
+        private const val POLL_WAIT_MS = 15_000L
+        private const val RETRY_MS = 2_000L
     }
 }
