@@ -234,7 +234,9 @@ class EditReviewWatcher(
                     file.path,
                     original = before ?: "",
                     title = name,
-                    focus = false
+                    // Activate the diff: opening several silently in the background
+                    // leaves a pile of review tabs the user never notices.
+                    focus = true
                 )
                 host.log(
                     if (result.opened) {
