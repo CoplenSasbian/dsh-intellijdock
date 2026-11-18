@@ -78,21 +78,19 @@ object IdeTools {
     fun build(
         project: Project,
         log: (String) -> Unit,
-        write: Boolean,
-        /** Tool-name prefix: the IDE's slug (`idea`, `clion`, …). */
-        ns: String = IdeIdentity.slug
+        write: Boolean
     ): List<McpTool> {
         val tools = ArrayList<McpTool>(18)
-        tools += readTools(project, log, ns)
-        if (write) tools += writeTools(project, log, ns)
+        tools += readTools(project, log)
+        if (write) tools += writeTools(project, log)
         return tools
     }
 
     /* --------------------------------- read tools ------------------------------ */
 
-    private fun readTools(project: Project, log: (String) -> Unit, ns: String): List<McpTool> = listOf(
+    private fun readTools(project: Project, log: (String) -> Unit): List<McpTool> = listOf(
         tool(
-            name = "${ns}_workspace_folders",
+            name = "workspace_folders",
             description = "List the IDE project's content roots and the active editor (path, file type). " +
                 "Use it to learn which project the user is in.",
             schema = noArguments()
@@ -119,7 +117,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_selection",
+            name = "selection",
             description = "The active editor: file, file type, cursor position and the selected text " +
                 "(truncated at 4000 characters). An empty selection means the caret position alone.",
             schema = noArguments()
@@ -154,7 +152,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_read_file",
+            name = "read_file",
             description = "Read an editor file, including unsaved changes. Optional 1-based line range. " +
                 "Truncated at 2000 lines or 256 KB.",
             schema = schema(
@@ -206,7 +204,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_symbols",
+            name = "symbols",
             description = "The document outline from the IDE's PSI: named elements with kind and line, " +
                 "at most 3 levels deep and 200 nodes.",
             schema = schema(
@@ -234,7 +232,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_list_files",
+            name = "list_files",
             description = "List project files by glob (for example **/*.kt). Use it to learn the tree " +
                 "before reading specific files.",
             schema = schema(
@@ -276,7 +274,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_search",
+            name = "search",
             description = "Search the project text and return matching lines: path, line, column and a short " +
                 "preview. Pass include/exclude globs to narrow it.",
             schema = schema(
@@ -357,7 +355,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_diagnostics",
+            name = "diagnostics",
             description = "Errors and warnings the IDE's analysis attached to files. Defaults to the active " +
                 "file; pass path or scope \"workspace\" for more. Returns counts and at most 200 items.",
             schema = schema(
@@ -428,7 +426,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_definitions",
+            name = "definitions",
             description = "Where is this symbol defined? Resolves the reference at a position and returns the " +
                 "locations (path, line, column). Defaults to the active editor caret.",
             schema = schema(
@@ -466,7 +464,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_references",
+            name = "references",
             description = "Every place this symbol is used. Defaults to the active editor caret.",
             schema = schema(
                 linkedMapOf(
@@ -510,7 +508,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_hover",
+            name = "hover",
             description = "The documentation the IDE shows for the symbol at a position (plain text, bounded). " +
                 "Defaults to the active editor caret.",
             schema = schema(
@@ -545,7 +543,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_code_actions",
+            name = "code_actions",
             description = "Quick fixes and intentions available at a position or selection. Lists titles only; " +
                 "applying one is a separate, deliberate step.",
             schema = schema(
@@ -590,7 +588,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_reveal",
+            name = "reveal",
             description = "Open a file in the editor and put the caret on a line (no diff). Use it when the user " +
                 "should look at code rather than at a change.",
             schema = schema(
@@ -610,7 +608,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_open_diff",
+            name = "open_diff",
             description = "Open a change in the IDE's diff editor for review. Pass original with the text the file " +
                 "had before your change; without it the cached review baseline is used. Nothing is written.",
             schema = schema(
@@ -639,9 +637,9 @@ object IdeTools {
 
     /* -------------------------------- write tools ------------------------------ */
 
-    private fun writeTools(project: Project, log: (String) -> Unit, ns: String): List<McpTool> = listOf(
+    private fun writeTools(project: Project, log: (String) -> Unit): List<McpTool> = listOf(
         tool(
-            name = "${ns}_apply_edit",
+            name = "apply_edit",
             description = "Replace a range (or the whole file) with new text through a write command: the buffer " +
                 "becomes unsaved (Ctrl+Z undoes it) and the change opens in a diff tab. Nothing is saved unless " +
                 "save is true.",
@@ -705,7 +703,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_save_file",
+            name = "save_file",
             description = "Save one file (by absolute path). Omit the path to save every unsaved document.",
             schema = schema(linkedMapOf("path" to stringProperty("Absolute file path. Omit to save every dirty document.")))
         ) { args ->
@@ -748,9 +746,9 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_run_task",
+            name = "run_task",
             description = "List the project's run configurations, or start one by name. Returns as soon as the " +
-                "process starts, with a job id; poll ${ns}_job_status for its state, exit code and output. The " +
+                "process starts, with a job id; poll job_status for its state, exit code and output. The " +
                 "output also appears in the Run tool window.",
             schema = schema(linkedMapOf("label" to stringProperty("Run configuration name. Omit to list them.")))
         ) { args ->
@@ -777,10 +775,10 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_terminal_run",
+            name = "terminal_run",
             description = "Run a command line in the IDE's Run tool window (named DSH Agent). Returns a job id as " +
-                "soon as it starts; poll ${ns}_job_status or ${ns}_job_output for the output, or stop it with " +
-                "${ns}_job_stop.",
+                "soon as it starts; poll job_status or job_output for the output, or stop it with " +
+                "job_stop.",
             schema = schema(
                 linkedMapOf(
                     "command" to stringProperty("The command line to run."),
@@ -797,9 +795,9 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_start_debug",
+            name = "start_debug",
             description = "List the run configurations, or start debugging one by name. Returns a job id as soon as " +
-                "the debug session starts; poll ${ns}_job_status for its state.",
+                "the debug session starts; poll job_status for its state.",
             schema = schema(linkedMapOf("name" to stringProperty("Run configuration name. Omit to list them.")))
         ) { args ->
             val name = text(args, "name")
@@ -825,8 +823,8 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_job_status",
-            description = "Status of a job started by ${ns}_run_task, ${ns}_terminal_run or ${ns}_start_debug: " +
+            name = "job_status",
+            description = "Status of a job started by run_task, terminal_run or start_debug: " +
                 "starting/running/finished/failed, exit code, duration, the latest output and the full output file. " +
                 "Pass waitMs to wait for it to finish instead of polling.",
             schema = schema(
@@ -844,7 +842,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_job_output",
+            name = "job_output",
             description = "Read a slice of a job's output by character offset, for tailing a long-running process.",
             schema = schema(
                 linkedMapOf(
@@ -861,7 +859,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_job_stop",
+            name = "job_stop",
             description = "Ask a running job to stop (destroy its process).",
             schema = schema(linkedMapOf("id" to stringProperty("Job id.")), required = listOf("id"))
         ) { args ->
@@ -871,7 +869,7 @@ object IdeTools {
         },
 
         tool(
-            name = "${ns}_job_list",
+            name = "job_list",
             description = "List the jobs this IDE session started, newest last.",
             schema = schema(emptyMap())
         ) { _ ->
