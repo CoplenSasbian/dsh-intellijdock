@@ -5,6 +5,7 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.IconLoader
 
 /**
  * The plugin's actions.
@@ -96,8 +97,11 @@ class DshDockOpenDiffAction : AnAction() {
 class DshDockToggleToolsAction : AnAction(
     DshDockBundle.message("dock.tools.tools"),
     DshDockBundle.message("action.toggleTools.description"),
-    com.intellij.icons.AllIcons.Nodes.Plugin
+    IconLoader.getIcon("/icons/tools.svg", DshDockToggleToolsAction::class.java)
 ) {
+
+    private val onIcon = IconLoader.getIcon("/icons/tools-on.svg", DshDockToggleToolsAction::class.java)
+    private val offIcon = IconLoader.getIcon("/icons/tools.svg", DshDockToggleToolsAction::class.java)
 
     override fun actionPerformed(event: AnActionEvent) {
         withService(event) { it.toggleToolsFromDock() }
@@ -106,9 +110,9 @@ class DshDockToggleToolsAction : AnAction(
     override fun update(event: AnActionEvent) {
         val service = event.project?.let { DockService.getInstance(it) }
         val running = service?.mcpRunning() == true
-        // In the tool window header only the icon shows, so it carries the state.
-        event.presentation.icon = if (running) com.intellij.icons.AllIcons.General.InspectionsOK
-        else com.intellij.icons.AllIcons.Nodes.Plugin
+        // Distinct shape + lit colour: a header shows icons only, and two plain
+        // green checks (tools and diff) are impossible to tell apart.
+        event.presentation.icon = if (running) onIcon else offIcon
         event.presentation.text = DshDockBundle.message(
             if (running) "action.toggleTools.on" else "action.toggleTools.off"
         )
@@ -123,8 +127,11 @@ class DshDockToggleToolsAction : AnAction(
 class DshDockToggleReviewAction : AnAction(
     DshDockBundle.message("action.toggleReview.off"),
     DshDockBundle.message("action.toggleReview.description"),
-    com.intellij.icons.AllIcons.Actions.Diff
+    IconLoader.getIcon("/icons/review.svg", DshDockToggleReviewAction::class.java)
 ) {
+
+    private val onIcon = IconLoader.getIcon("/icons/review-on.svg", DshDockToggleReviewAction::class.java)
+    private val offIcon = IconLoader.getIcon("/icons/review.svg", DshDockToggleReviewAction::class.java)
 
     override fun actionPerformed(event: AnActionEvent) {
         withService(event) { it.toggleReview() }
@@ -135,8 +142,7 @@ class DshDockToggleReviewAction : AnAction(
         event.presentation.text = DshDockBundle.message(
             if (enabled) "action.toggleReview.on" else "action.toggleReview.off"
         )
-        event.presentation.icon = if (enabled) com.intellij.icons.AllIcons.General.InspectionsOK
-        else com.intellij.icons.AllIcons.Actions.Diff
+        event.presentation.icon = if (enabled) onIcon else offIcon
         event.presentation.description = DshDockBundle.message("action.toggleReview.description")
         event.presentation.isEnabled = event.project != null
     }
