@@ -20,8 +20,10 @@ plugin that runs inside DSH.
 - **Editor tools for the agent.** Thirteen read-only tools run in the IDE: workspace folders,
   selection, file contents (unsaved buffers included), diagnostics, symbols, search, list
   files by pattern, definitions and references, hover docs, code actions, reveal, and review
-  diff. Five write tools (edit, save, run configuration, terminal, start debug) are off by
-  default.
+  diff. Nine write tools (edit, save, run configuration, terminal, start debug, and the job
+  status/output/stop/list pair) are off by default. Run, terminal and debug **start a job and
+  return at once**; the agent polls `job_status` (optionally with `waitMs`) or reads
+  `job_output`, and stops it with `job_stop`.
 - **A namespace per IDE.** Tools are namespaced by the host product — `mcp__idea__*` in IntelliJ
   IDEA, `mcp__clion__*` in CLion, `mcp__pycharm__*` in PyCharm, and so on — so several docks in
   different IDEs stay distinguishable in DSH.

@@ -3,9 +3,13 @@ package cc.futurvo.ideadock.editor
 import cc.futurvo.ideadock.contract.Glob
 import cc.futurvo.ideadock.contract.McpTool
 import cc.futurvo.ideadock.contract.Paths
+import com.intellij.execution.ExecutionListener
+import com.intellij.execution.ExecutionManager
 import com.intellij.execution.RunContentExecutor
 import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.execution.process.OSProcessHandler
+import com.intellij.execution.process.ProcessHandler
+import com.intellij.execution.runners.ExecutionEnvironment
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
@@ -38,8 +42,9 @@ import java.io.File
  *
  * Thirteen of them only read - the workspace, the active selection, file
  * contents, the outline, diagnostics, definitions, references, hovers, code
- * actions, the finder and the review diff - and five change something (a buffer,
- * a save, a run configuration, a command line, a debug session). The write tools
+ * actions, the finder and the review diff - and nine change something (a buffer,
+ * a save, a run configuration, a command line, a debug session, and the job
+ * status/output/stop/list tools). The write tools
  * only exist when `dshIdeadock.mcpWriteTools` is on, because they reach past the
  * DSH sandbox into the IDE.
  *
@@ -697,8 +702,9 @@ object IdeTools {
 
         tool(
             name = "${ns}_run_task",
-            description = "List the project's run configurations, or run one by name. The output appears in the " +
-                "Run tool window, not in this answer.",
+            description = "List the project's run configurations, or start one by name. Returns as soon as the " +
+                "process starts, with a job id; poll ${ns}_job_status for its state, exit code and output. The " +
+                "output also appears in the Run tool window.",
             schema = schema(linkedMapOf("label" to stringProperty("Run configuration name. Omit to list them.")))
         ) { args ->
             val label = text(args, "label")
@@ -718,15 +724,16 @@ object IdeTools {
                     "reason" to "no run configuration named $label",
                     "configurations" to configurations.take(MAX_ACTIONS).map { it.name }
                 )
-            val started = edt { IdeAdapter.execute(project, settings, debug = false) }
-            log("mcp: run ${settings.name} -> $started")
-            linkedMapOf<String, Any?>("started" to started, "label" to settings.name)
+            val job = startConfiguredJob(project, settings, debug = false)
+            log("mcp: run ${settings.name} -> job ${job.id}")
+            RunJobs.started(job)
         },
 
         tool(
             name = "${ns}_terminal_run",
-            description = "Run a command line in the IDE's Run tool window (named DSH Agent). The output stays " +
-                "there; this answer only says it started.",
+            description = "Run a command line in the IDE's Run tool window (named DSH Agent). Returns a job id as " +
+                "soon as it starts; poll ${ns}_job_status or ${ns}_job_output for the output, or stop it with " +
+                "${ns}_job_stop.",
             schema = schema(
                 linkedMapOf(
                     "command" to stringProperty("The command line to run."),
@@ -737,15 +744,15 @@ object IdeTools {
         ) { args ->
             val command = text(args, "command") ?: error("command is required")
             val cwd = text(args, "cwd") ?: contentRoots(project).firstOrNull()
-            edt { runInRunWindow(project, command, cwd, "DSH Agent") }
-            log("mcp: command \"$command\"")
-            linkedMapOf<String, Any?>("started" to true, "command" to command, "cwd" to cwd)
+            val job = edt { runInRunWindow(project, command, cwd, "DSH Agent") }
+            log("mcp: command \"$command\" -> job ${job.id}")
+            RunJobs.started(job)
         },
 
         tool(
             name = "${ns}_start_debug",
-            description = "List the run configurations, or debug one by name. Debugging happens in the IDE; this " +
-                "answer only says it started.",
+            description = "List the run configurations, or start debugging one by name. Returns a job id as soon as " +
+                "the debug session starts; poll ${ns}_job_status for its state.",
             schema = schema(linkedMapOf("name" to stringProperty("Run configuration name. Omit to list them.")))
         ) { args ->
             val name = text(args, "name")
@@ -765,9 +772,70 @@ object IdeTools {
                     "reason" to "no run configuration named $name",
                     "configurations" to configurations.take(MAX_ACTIONS).map { it.name }
                 )
-            val started = edt { IdeAdapter.execute(project, settings, debug = true) }
-            log("mcp: debug ${settings.name} -> $started")
-            linkedMapOf<String, Any?>("started" to started, "name" to settings.name)
+            val job = startConfiguredJob(project, settings, debug = true)
+            log("mcp: debug ${settings.name} -> job ${job.id}")
+            RunJobs.started(job)
+        },
+
+        tool(
+            name = "${ns}_job_status",
+            description = "Status of a job started by ${ns}_run_task, ${ns}_terminal_run or ${ns}_start_debug: " +
+                "starting/running/finished/failed, exit code, duration, the latest output and the full output file. " +
+                "Pass waitMs to wait for it to finish instead of polling.",
+            schema = schema(
+                linkedMapOf(
+                    "id" to stringProperty("Job id returned when it started."),
+                    "maxChars" to intProperty("Maximum output characters to return, default 4000.", minimum = 0, maximum = 100_000),
+                    "waitMs" to intProperty("Wait up to this many milliseconds for the job to finish, default 0.", minimum = 0, maximum = 60_000)
+                ),
+                required = listOf("id")
+            )
+        ) { args ->
+            val id = text(args, "id") ?: error("id is required")
+            val job = RunJobs.find(id) ?: error("unknown job id: $id")
+            RunJobs.waitFor(job, int(args, "waitMs", 0), int(args, "maxChars", 4000).coerceIn(0, 100_000))
+        },
+
+        tool(
+            name = "${ns}_job_output",
+            description = "Read a slice of a job's output by character offset, for tailing a long-running process.",
+            schema = schema(
+                linkedMapOf(
+                    "id" to stringProperty("Job id."),
+                    "offset" to intProperty("Character offset to start at, default 0.", minimum = 0),
+                    "maxChars" to intProperty("Maximum characters, default 8000.", minimum = 0, maximum = 100_000)
+                ),
+                required = listOf("id")
+            )
+        ) { args ->
+            val id = text(args, "id") ?: error("id is required")
+            val job = RunJobs.find(id) ?: error("unknown job id: $id")
+            RunJobs.output(job, int(args, "offset", 0).coerceAtLeast(0), int(args, "maxChars", 8000).coerceIn(0, 100_000))
+        },
+
+        tool(
+            name = "${ns}_job_stop",
+            description = "Ask a running job to stop (destroy its process).",
+            schema = schema(linkedMapOf("id" to stringProperty("Job id.")), required = listOf("id"))
+        ) { args ->
+            val id = text(args, "id") ?: error("id is required")
+            val job = RunJobs.find(id) ?: error("unknown job id: $id")
+            linkedMapOf<String, Any?>("id" to job.id, "stopped" to RunJobs.stop(job))
+        },
+
+        tool(
+            name = "${ns}_job_list",
+            description = "List the jobs this IDE session started, newest last.",
+            schema = schema(emptyMap())
+        ) { _ ->
+            linkedMapOf(
+                "jobs" to RunJobs.all().map {
+                    linkedMapOf<String, Any?>(
+                        "id" to it.id, "name" to it.name, "kind" to it.kind,
+                        "status" to it.state, "exitCode" to it.exitCode
+                    )
+                }
+            )
         }
     )
 
@@ -868,16 +936,67 @@ object IdeTools {
         ProjectRootManager.getInstance(project).contentRoots.map { root -> root.path }
     }
 
-    private fun runInRunWindow(project: Project, command: String, cwd: String?, title: String) {
+    private fun startConfiguredJob(
+        project: Project,
+        settings: com.intellij.execution.RunnerAndConfigurationSettings,
+        debug: Boolean
+    ): RunJobs.Job {
+        val job = RunJobs.create(settings.name, if (debug) "debug" else "run")
+        val connection = project.messageBus.connect()
+        val listener = object : ExecutionListener {
+            override fun processStarted(executorId: String, env: ExecutionEnvironment, handler: ProcessHandler) {
+                if (env.runProfile?.name == job.name) {
+                    RunJobs.attach(job, handler)
+                    connection.disconnect()
+                }
+            }
+
+            override fun processNotStarted(executorId: String, env: ExecutionEnvironment) {
+                if (env.runProfile?.name == job.name) {
+                    RunJobs.fail(job, "the IDE did not start ${job.name}")
+                    connection.disconnect()
+                }
+            }
+
+            override fun processTerminated(
+                executorId: String,
+                env: ExecutionEnvironment,
+                handler: ProcessHandler,
+                exitCode: Int
+            ) {
+                if (env.runProfile?.name == job.name) {
+                    RunJobs.attach(job, handler)
+                }
+            }
+        }
+        connection.subscribe(ExecutionManager.EXECUTION_TOPIC, listener)
+        try {
+            val started = edt { IdeAdapter.execute(project, settings, debug) }
+            if (!started) {
+                RunJobs.fail(job, "cannot start ${job.name}")
+                connection.disconnect()
+            }
+        } catch (error: Throwable) {
+            RunJobs.fail(job, error.message ?: "cannot start ${job.name}")
+            connection.disconnect()
+        }
+        return job
+    }
+
+    private fun runInRunWindow(project: Project, command: String, cwd: String?, title: String): RunJobs.Job {
+        val job = RunJobs.create("$title: $command", "terminal")
         try {
             val line = if (cwd.isNullOrBlank()) command else "cd /d \"$cwd\" && $command"
             val commandLine = GeneralCommandLine(*shellCommand(line).toTypedArray())
             val handler = OSProcessHandler(commandLine)
+            RunJobs.attach(job, handler)
             val executor = RunContentExecutor(project, handler).withTitle(title).withActivateToolWindow(true)
             Disposer.register(project, executor)
             executor.run()
+            return job
         } catch (error: Throwable) {
-            error("cannot run the command: ${error.message}")
+            RunJobs.fail(job, "cannot run the command: ${error.message}")
+            throw IllegalStateException("cannot run the command: ${error.message}", error)
         }
     }
 
