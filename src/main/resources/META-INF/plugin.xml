@@ -46,6 +46,12 @@
         icon="/icons/dock.svg"
         factoryClass="cc.futurvo.ideadock.dock.DockToolWindowFactory"/>
 
+    <toolWindow
+        id="DSH Review"
+        anchor="right"
+        icon="/icons/review.svg"
+        factoryClass="cc.futurvo.ideadock.dock.ReviewToolWindowFactory"/>
+
     <projectConfigurable
         instance="cc.futurvo.ideadock.ui.DshDockConfigurable"
         id="dsh.ideadock"

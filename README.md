@@ -15,8 +15,8 @@ plugin that runs inside DSH.
 - **Typing that works.** The app is loaded as the browser's top-level document instead of an
   iframe, so Chinese input methods commit normally; the title bar is drawn by the plugin.
 - **Files open in the IDE.** A file path in a tool card opens in the editor, not in the dock's
-  own preview. When DSH creates or changes a file, a review diff opens by itself — a diff tab
-  next to the work, with focus returned to your editor.
+  own preview. When DSH creates or changes a file, the change goes to the single **DSH Review**
+  tab — a list on the left, the selected before/after diff on the right.
 - **Send code to the conversation.** Right-click a file or a selection → *Add to DSH Conversation*;
   the composer gets `@path (lines a–b)` and the agent starts from that location.
 - **Editor tools for the agent.** Thirteen read-only tools run in the IDE: workspace folders,

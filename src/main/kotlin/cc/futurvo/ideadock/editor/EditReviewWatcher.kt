@@ -229,24 +229,10 @@ class EditReviewWatcher(
         val name = Paths.fileName(file.path)
         ApplicationManager.getApplication().invokeLater({
             try {
-                val result = ReviewDiff.open(
-                    project,
-                    file.path,
-                    original = before ?: "",
-                    title = name,
-                    // Activate the diff: opening several silently in the background
-                    // leaves a pile of review tabs the user never notices.
-                    focus = true
-                )
-                host.log(
-                    if (result.opened) {
-                        "review: opened ${file.path} (${text.length - (before?.length ?: 0)} chars)"
-                    } else {
-                        "review: ${file.path} not opened: ${result.reason}"
-                    }
-                )
+                ReviewStore.getInstance(project).add(file.path, name, before ?: "", text)
+                host.log("review: queued ${file.path} (${text.length - (before?.length ?: 0)} chars)")
             } catch (error: Throwable) {
-                host.log("review: cannot open ${file.path}: ${error.message}")
+                host.log("review: cannot queue ${file.path}: ${error.message}")
             }
         }, com.intellij.openapi.application.ModalityState.any())
     }
