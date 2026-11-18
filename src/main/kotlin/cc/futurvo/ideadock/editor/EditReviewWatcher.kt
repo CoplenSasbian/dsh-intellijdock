@@ -5,9 +5,7 @@ import com.google.gson.JsonParser
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
-import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
-import com.intellij.openapi.fileEditor.FileDocumentManagerListener
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
@@ -72,17 +70,6 @@ class EditReviewWatcher(
     /** Begin following the feed: cache a baseline, then poll. */
     fun start() {
         if (!started.compareAndSet(false, true)) return
-        // A save the IDE makes is the baseline the next reported write compares
-        // with, so the user's own typing is never shown as DSH's change.
-        project.messageBus.connect(this).subscribe(
-            FileDocumentManagerListener.TOPIC,
-            object : FileDocumentManagerListener {
-                override fun beforeDocumentSaving(document: Document) {
-                    val file = FileDocumentManager.getInstance().getFile(document) ?: return
-                    baseline[file.path] = document.text
-                }
-            }
-        )
         Thread({ cacheWorkspace() }, "dsh-ideadock-review-cache").apply {
             isDaemon = true
             start()
@@ -209,7 +196,11 @@ class EditReviewWatcher(
         val text = readText(file) ?: return
         val before = baseline[file.path]
         if (before == text) {
+            // The IDE may have reloaded the new text into its buffer and saved it
+            // before this review ran. Do not overwrite the baseline: remember the
+            // first look as the next honest comparison point.
             baseline[file.path] = text
+            host.log("review: ${file.path} matches the cached baseline, so there is no diff")
             return
         }
         if (before == null) {
