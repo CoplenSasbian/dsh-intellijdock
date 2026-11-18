@@ -68,7 +68,10 @@ object IdeTools {
     private const val MAX_ACTIONS = 50
     private const val MAX_FILES = 500
     private const val MAX_SEARCH_BYTES = 512L * 1024
+    private const val MAX_SEARCH_TOTAL_BYTES = 64L * 1024 * 1024
+    private const val SEARCH_BUDGET_MS = 20_000L
     private const val MAX_EDIT_CHARS = 512 * 1024
+    private const val MAX_LOAD_BYTES = 8 * 1024 * 1024
     private const val READ_TIMEOUT_MS = 5_000L
 
     /** Every tool, read-only ones first. */
@@ -167,8 +170,11 @@ object IdeTools {
             val file = fileFor(path) ?: error("not found: $path")
             if (file.isDirectory) error("not a file: $path")
             if (file.fileType.isBinary) error("binary file: $path")
+            val document = read { FileDocumentManager.getInstance().getDocument(file) }
+            if (document == null && file.length > MAX_LOAD_BYTES) {
+                error("file is ${file.length} bytes, over the $MAX_LOAD_BYTES-byte read limit")
+            }
             val (text, dirty) = read {
-                val document = FileDocumentManager.getInstance().getDocument(file)
                 val content = document?.text ?: VfsUtilCore.loadText(file)
                 content to (document != null && FileDocumentManager.getInstance().isDocumentUnsaved(document))
             }
@@ -299,14 +305,22 @@ object IdeTools {
             }
             val matches = ArrayList<Map<String, Any?>>(limit)
             var scanned = 0
+            var bytes = 0L
+            var exhausted = false
+            val deadline = System.nanoTime() + SEARCH_BUDGET_MS * 1_000_000
             read {
                 val index = ProjectFileIndex.getInstance(project)
                 index.iterateContent(object : ContentIterator {
                     override fun processFile(fileOrDir: VirtualFile): Boolean {
                         if (matches.size >= limit || scanned >= MAX_SEARCH_FILES) return false
+                        if (bytes >= MAX_SEARCH_TOTAL_BYTES || System.nanoTime() > deadline) {
+                            exhausted = true
+                            return false
+                        }
                         if (fileOrDir.isDirectory) return true
                         if (fileOrDir.length > MAX_SEARCH_BYTES) return true
                         if (fileOrDir.fileType.isBinary) return true
+                        bytes += fileOrDir.length
                         val root = index.getContentRootForFile(fileOrDir) ?: return true
                         val relative = VfsUtilCore.getRelativePath(fileOrDir, root, '/') ?: return true
                         if (!includeMatcher(relative)) return true
@@ -337,7 +351,8 @@ object IdeTools {
                 "query" to query,
                 "matches" to matches,
                 "scanned" to scanned,
-                "truncated" to (matches.size >= limit || scanned >= MAX_SEARCH_FILES)
+                "truncated" to (matches.size >= limit || scanned >= MAX_SEARCH_FILES || exhausted),
+                "stopped" to if (exhausted) "budget" else if (scanned >= MAX_SEARCH_FILES) "file limit" else null
             )
         },
 
@@ -424,6 +439,13 @@ object IdeTools {
                 )
             )
         ) { args ->
+            if (DumbService.isDumb(project)) {
+                return@tool linkedMapOf(
+                    "reason" to "indexing",
+                    "retry" to true,
+                    "locations" to emptyList<Any?>()
+                )
+            }
             val target = resolveTarget(project, args)
             val locations = read {
                 val reference = target.psi.findReferenceAt(target.offset)
@@ -454,18 +476,30 @@ object IdeTools {
                 )
             )
         ) { args ->
+            if (DumbService.isDumb(project)) {
+                return@tool linkedMapOf(
+                    "reason" to "indexing",
+                    "retry" to true,
+                    "locations" to emptyList<Any?>()
+                )
+            }
             val target = resolveTarget(project, args)
             val locations = read {
                 val reference = target.psi.findReferenceAt(target.offset)
                 val element = reference?.resolve() ?: target.psi.findElementAt(target.offset)
                 ?: return@read emptyList<Map<String, Any?>>()
-                val found = ReferencesSearch
+                val found = ArrayList<Map<String, Any?>>()
+                // Stop the search itself at the cap: a hot symbol can have
+                // thousands of usages and materialising them all is wasteful.
+                ReferencesSearch
                     .search(element, GlobalSearchScope.projectScope(project), false)
-                    .findAll()
-                found.take(MAX_LOCATIONS).mapNotNull { usage ->
-                    val file = usage.element.containingFile?.virtualFile ?: return@mapNotNull null
-                    location(file, usage.element.textOffset)
-                }
+                    .forEach(com.intellij.util.Processor { usage ->
+                        if (found.size >= MAX_LOCATIONS) return@Processor false
+                        val file = usage.element.containingFile?.virtualFile ?: return@Processor true
+                        found += location(file, usage.element.textOffset)
+                        true
+                    })
+                found
             }
             log("mcp: references ${target.psi.virtualFile.path} -> ${locations.size}")
             linkedMapOf(
@@ -487,6 +521,9 @@ object IdeTools {
                 )
             )
         ) { args ->
+            if (DumbService.isDumb(project)) {
+                return@tool linkedMapOf("reason" to "indexing", "retry" to true, "text" to "")
+            }
             val target = resolveTarget(project, args)
             val text = try {
                 read {
@@ -519,19 +556,23 @@ object IdeTools {
                 )
             )
         ) { args ->
+            if (DumbService.isDumb(project)) {
+                return@tool linkedMapOf("reason" to "indexing", "retry" to true, "actions" to emptyList<Any?>())
+            }
             val target = resolveTarget(project, args)
-            val actions = read {
+            val actions = edt {
                 val document = FileDocumentManager.getInstance().getDocument(target.psi.virtualFile)
-                    ?: return@read emptyList<IdeAdapter.CodeAction>()
-                val selected = edt { FileEditorManager.getInstance(project).selectedTextEditor }
+                    ?: return@edt emptyList<IdeAdapter.CodeAction>()
+                val selected = FileEditorManager.getInstance(project).selectedTextEditor
                 val reuse = selected != null && selected.document === document
-                val editor: Editor = if (reuse) selected!! else IdeAdapter.headlessEditor(project, target.psi.virtualFile, document)
+                val editor: Editor = if (reuse) selected!!
+                else IdeAdapter.headlessEditor(project, target.psi.virtualFile, document)
                 try {
-                    IdeAdapter.codeActions(project, editor, target.psi, target.offset).take(MAX_ACTIONS)
+                    read { IdeAdapter.codeActions(project, editor, target.psi, target.offset).take(MAX_ACTIONS) }
                 } catch (error: IdeAdapter.NotAvailable) {
                     emptyList()
                 } finally {
-                    if (!reuse) edt { EditorFactory.getInstance().releaseEditor(editor) }
+                    if (!reuse) EditorFactory.getInstance().releaseEditor(editor)
                 }
             }
             log("mcp: code actions ${target.psi.virtualFile.path} -> ${actions.size}")
@@ -687,16 +728,22 @@ object IdeTools {
                     "failed" to if (saved) emptyList<String>() else listOf(path)
                 )
             }
-            val saved = edt {
-                FileDocumentManager.getInstance().saveAllDocuments()
-                FileDocumentManager.getInstance().unsavedDocuments.mapNotNull { document ->
-                    FileDocumentManager.getInstance().getFile(document)?.path
-                }
+            val before = edt {
+                FileDocumentManager.getInstance().unsavedDocuments
+                    .mapNotNull { FileDocumentManager.getInstance().getFile(it)?.path }
+                    .toSet()
             }
-            log("mcp: save all -> ${if (saved.isEmpty()) "clean" else "${saved.size} still unsaved"}")
+            val after = edt {
+                FileDocumentManager.getInstance().saveAllDocuments()
+                FileDocumentManager.getInstance().unsavedDocuments
+                    .mapNotNull { FileDocumentManager.getInstance().getFile(it)?.path }
+                    .toSet()
+            }
+            val saved = before - after
+            log("mcp: save all -> ${saved.size} saved, ${after.size} still unsaved")
             linkedMapOf(
-                "saved" to emptyList<String>(),
-                "failed" to saved
+                "saved" to saved.toList(),
+                "failed" to after.toList()
             )
         },
 
@@ -708,7 +755,7 @@ object IdeTools {
             schema = schema(linkedMapOf("label" to stringProperty("Run configuration name. Omit to list them.")))
         ) { args ->
             val label = text(args, "label")
-            val configurations = IdeAdapter.runConfigurations(project)
+            val configurations = edt { IdeAdapter.runConfigurations(project) }
             if (label == null) {
                 log("mcp: run configurations -> ${configurations.size}")
                 return@tool linkedMapOf(
@@ -718,7 +765,7 @@ object IdeTools {
                     "truncated" to (configurations.size > MAX_ACTIONS)
                 )
             }
-            val settings = IdeAdapter.findConfiguration(project, label)
+            val settings = edt { IdeAdapter.findConfiguration(project, label) }
                 ?: return@tool linkedMapOf<String, Any?>(
                     "started" to false,
                     "reason" to "no run configuration named $label",
@@ -756,7 +803,7 @@ object IdeTools {
             schema = schema(linkedMapOf("name" to stringProperty("Run configuration name. Omit to list them.")))
         ) { args ->
             val name = text(args, "name")
-            val configurations = IdeAdapter.runConfigurations(project)
+            val configurations = edt { IdeAdapter.runConfigurations(project) }
             if (name == null) {
                 log("mcp: debug configurations -> ${configurations.size}")
                 return@tool linkedMapOf(
@@ -766,7 +813,7 @@ object IdeTools {
                     "truncated" to (configurations.size > MAX_ACTIONS)
                 )
             }
-            val settings = IdeAdapter.findConfiguration(project, name)
+            val settings = edt { IdeAdapter.findConfiguration(project, name) }
                 ?: return@tool linkedMapOf<String, Any?>(
                     "started" to false,
                     "reason" to "no run configuration named $name",
@@ -986,7 +1033,13 @@ object IdeTools {
     private fun runInRunWindow(project: Project, command: String, cwd: String?, title: String): RunJobs.Job {
         val job = RunJobs.create("$title: $command", "terminal")
         try {
-            val line = if (cwd.isNullOrBlank()) command else "cd /d \"$cwd\" && $command"
+            val line = if (cwd.isNullOrBlank()) {
+                command
+            } else if (isWindows()) {
+                "cd /d \"$cwd\" && $command"
+            } else {
+                "cd \"$cwd\" && $command"
+            }
             val commandLine = GeneralCommandLine(*shellCommand(line).toTypedArray())
             val handler = OSProcessHandler(commandLine)
             RunJobs.attach(job, handler)
@@ -1001,11 +1054,14 @@ object IdeTools {
     }
 
     private fun shellCommand(line: String): List<String> =
-        if (System.getProperty("os.name").orEmpty().lowercase().contains("win")) {
+        if (isWindows()) {
             listOf("cmd.exe", "/c", line)
         } else {
             listOf("/bin/sh", "-lc", line)
         }
+
+    private fun isWindows(): Boolean =
+        System.getProperty("os.name").orEmpty().lowercase().contains("win")
 
     private fun <T> read(block: () -> T): T = ReadAction.compute<T, RuntimeException> { block() }
 
