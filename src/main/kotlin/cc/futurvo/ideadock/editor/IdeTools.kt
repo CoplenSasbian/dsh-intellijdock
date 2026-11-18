@@ -1017,16 +1017,20 @@ object IdeTools {
             }
         }
         connection.subscribe(ExecutionManager.EXECUTION_TOPIC, listener)
-        try {
-            val started = edt { IdeAdapter.execute(project, settings, debug) }
-            if (!started) {
-                RunJobs.fail(job, "cannot start ${job.name}")
+        // Start on the EDT without waiting for it: a misconfigured run opens a
+        // modal error dialog, and the agent's call must not hang behind it. The
+        // listener above attaches the process (or marks the job failed) later.
+        ApplicationManager.getApplication().invokeLater({
+            try {
+                if (!IdeAdapter.execute(project, settings, debug)) {
+                    RunJobs.fail(job, "cannot start ${job.name}")
+                    connection.disconnect()
+                }
+            } catch (error: Throwable) {
+                RunJobs.fail(job, error.message ?: "cannot start ${job.name}")
                 connection.disconnect()
             }
-        } catch (error: Throwable) {
-            RunJobs.fail(job, error.message ?: "cannot start ${job.name}")
-            connection.disconnect()
-        }
+        }, ModalityState.any())
         return job
     }
 
