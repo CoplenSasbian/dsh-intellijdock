@@ -193,6 +193,13 @@ class EditReviewWatcher(
     /** Compare the new text with the baseline and open the diff. */
     private fun review(file: VirtualFile) {
         if (disposed.get() || !host.enabled()) return
+        // Only files in this project: a dock bound to a session in another
+        // workspace must not pop diffs for files the user cannot see here.
+        val roots = contentRoots()
+        if (!ReviewDecision.insideAny(file.path, roots)) {
+            host.log("review: ${file.path} is outside the open project; skipping")
+            return
+        }
         val text = readText(file) ?: return
         val before = baseline[file.path]
         if (before == text) {
