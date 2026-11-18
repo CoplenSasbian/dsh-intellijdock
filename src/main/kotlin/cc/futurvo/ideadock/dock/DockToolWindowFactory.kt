@@ -2,6 +2,7 @@ package cc.futurvo.ideadock.dock
 
 import cc.futurvo.ideadock.ui.DshDockOpenInBrowserAction
 import cc.futurvo.ideadock.ui.DshDockReloadAction
+import cc.futurvo.ideadock.ui.DshDockToggleReviewAction
 import cc.futurvo.ideadock.ui.DshDockToggleToolsAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
@@ -33,6 +34,7 @@ class DockToolWindowFactory : ToolWindowFactory {
         // state (puzzle -> green check), since a header shows icons only.
         toolWindow.setTitleActions(listOf(
             DshDockToggleToolsAction(),
+            DshDockToggleReviewAction(),
             DshDockReloadAction(),
             DshDockOpenInBrowserAction()
         ))

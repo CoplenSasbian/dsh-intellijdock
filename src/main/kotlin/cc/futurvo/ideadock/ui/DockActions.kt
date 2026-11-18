@@ -120,7 +120,11 @@ class DshDockToggleToolsAction : AnAction(
 }
 
 /** Turn the automatic review of DSH's edits on or off. */
-class DshDockToggleReviewAction : AnAction() {
+class DshDockToggleReviewAction : AnAction(
+    DshDockBundle.message("action.toggleReview.off"),
+    DshDockBundle.message("action.toggleReview.description"),
+    com.intellij.icons.AllIcons.Actions.Diff
+) {
 
     override fun actionPerformed(event: AnActionEvent) {
         withService(event) { it.toggleReview() }
@@ -131,6 +135,8 @@ class DshDockToggleReviewAction : AnAction() {
         event.presentation.text = DshDockBundle.message(
             if (enabled) "action.toggleReview.on" else "action.toggleReview.off"
         )
+        event.presentation.icon = if (enabled) com.intellij.icons.AllIcons.General.InspectionsOK
+        else com.intellij.icons.AllIcons.Actions.Diff
         event.presentation.description = DshDockBundle.message("action.toggleReview.description")
         event.presentation.isEnabled = event.project != null
     }
