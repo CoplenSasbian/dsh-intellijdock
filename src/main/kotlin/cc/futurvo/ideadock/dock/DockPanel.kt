@@ -209,7 +209,15 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
         val url = loadedUrl
         if (url != null) {
             try {
-                browser?.loadURL(url)
+                val cef = browser?.cefBrowser
+                // A plain loadURL of the URL already on screen is a no-op in
+                // JCEF (the SPA stays mounted); an explicit reload has to bypass
+                // the cache to fetch the rebuilt app.
+                if (cef != null && cef.url == url) {
+                    cef.reloadIgnoreCache()
+                } else {
+                    browser?.loadURL(url)
+                }
             } catch (error: Throwable) {
                 log.debug("jcef: reload failed: ${error.message}")
             }
