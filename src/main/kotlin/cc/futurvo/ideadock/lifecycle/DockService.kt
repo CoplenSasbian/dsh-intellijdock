@@ -869,6 +869,28 @@ class DockService(private val project: Project) : Disposable {
      * the part before the first NUL is a path - using the whole string is the
      * classic "cannot open file" bug.
      */
+    /**
+     * Add the selected editor location to the conversation's composer.
+     *
+     * The app owns the input machine, so this only transports the path and the
+     * selection; it resolves the workspace-relative mention and inserts it.
+     */
+    fun addToChat(path: String, startLine: Int, endLine: Int, startColumn: Int, endColumn: Int) {
+        onUi {
+            val target = panel
+            if (target == null) {
+                log.info("dock: add-to-chat requested with the dock closed")
+                notify(
+                    NotificationType.INFORMATION,
+                    DshDockBundle.message("notify.addToChat.title"),
+                    DshDockBundle.message("notify.addToChat.text")
+                )
+                return@onUi
+            }
+            target.addToChat(path, startLine, endLine, startColumn, endColumn)
+        }
+    }
+
     fun openFileFromDock(raw: String) {
         val target = raw.substringBefore('\u0000').trim()
         val source = raw.substringAfter('\u0000', "")

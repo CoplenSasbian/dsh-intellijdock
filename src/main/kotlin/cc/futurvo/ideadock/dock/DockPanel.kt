@@ -69,6 +69,8 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
     private var loadedUrl: String? = null
     /** The session the app on screen shows, for the handoff button. */
     private var currentSessionId: String = ""
+    /** A chat insertion requested before the app could receive messages. */
+    private var pendingChat: String? = null
 
     private val cards = JPanel(CardLayout())
     private var noJcefCard: JPanel? = null
@@ -182,6 +184,30 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
     fun pushMcpState(on: Boolean, detail: String) {
         val js = "if (window.dshMcpState) { window.dshMcpState($on, ${DockPage.jsString(detail)}) }"
         execute(js)
+    }
+
+    /** Ask the app to insert one editor location into its composer. */
+    fun addToChat(path: String, startLine: Int, endLine: Int, startColumn: Int, endColumn: Int) {
+        val json = buildString {
+            append("{\"type\":\"quickdock:add-to-chat\",\"path\":")
+            append(DockPage.jsString(path))
+            append(",\"line\":").append(startLine)
+            append(",\"endLine\":").append(endLine)
+            append(",\"column\":").append(startColumn)
+            append(",\"endColumn\":").append(endColumn)
+            append('}')
+        }
+        if (loadedUrl == null) {
+            pendingChat = json
+            return
+        }
+        sendToApp(json)
+    }
+
+    private fun flushPendingChat() {
+        val json = pendingChat ?: return
+        pendingChat = null
+        sendToApp(json)
     }
 
     /** Ask the app to show one session (the dock the Dock button bound). */
@@ -486,6 +512,7 @@ class DockPanel(private val project: Project) : JPanel(BorderLayout()), Disposab
             "quickdock:ready" -> {
                 sendToApp(contextJson())
                 service.followNow()
+                flushPendingChat()
             }
             "quickdock:open-file" -> Json.str(data, "path")?.let { service.openFileFromDock(it) }
             "quickdock:session" -> {

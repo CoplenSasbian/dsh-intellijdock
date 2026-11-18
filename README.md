@@ -17,6 +17,8 @@ plugin that runs inside DSH.
 - **Files open in the IDE.** A file path in a tool card opens in the editor, not in the dock's
   own preview. When DSH creates or changes a file, a review diff opens by itself — a diff tab
   next to the work, with focus returned to your editor.
+- **Send code to the conversation.** Right-click a file or a selection → *Add to DSH Conversation*;
+  the composer gets `@path (lines a–b)` and the agent starts from that location.
 - **Editor tools for the agent.** Thirteen read-only tools run in the IDE: workspace folders,
   selection, file contents (unsaved buffers included), diagnostics, symbols, search, list
   files by pattern, definitions and references, hover docs, code actions, reveal, and review

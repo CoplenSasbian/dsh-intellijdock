@@ -118,6 +118,13 @@
       <add-to-group group-id="ToolsMenu" anchor="last"/>
     </action>
 
+    <action id="DshDock.AddToChat"
+            class="cc.futurvo.ideadock.ui.DshDockAddToChatAction"
+            text="Add to DSH Conversation"
+            description="Insert this file and the selected lines into the DSH composer">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+    </action>
+
     <action id="DshDock.ToggleTools"
             class="cc.futurvo.ideadock.ui.DshDockToggleToolsAction"
             text="Enable Editor Tools for DSH"

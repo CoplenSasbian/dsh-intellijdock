@@ -4,6 +4,9 @@ import cc.futurvo.ideadock.lifecycle.DockService
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.IconLoader
 
@@ -37,6 +40,31 @@ class DshDockReloadAction : AnAction(
 ) {
     override fun actionPerformed(event: AnActionEvent) {
         withService(event) { it.reload(force = true, reloadDocument = true) }
+    }
+}
+
+/** Insert the selected editor location into the DSH composer. */
+class DshDockAddToChatAction : AnAction(
+    "Add to DSH Conversation",
+    "Insert this file and the selected lines into the DSH composer",
+    com.intellij.icons.AllIcons.General.Add
+) {
+    override fun actionPerformed(event: AnActionEvent) {
+        val project = event.project ?: return
+        val editor = event.getData(CommonDataKeys.EDITOR)
+            ?: FileEditorManager.getInstance(project).selectedTextEditor
+            ?: return
+        val document = editor.document
+        val file = FileDocumentManager.getInstance().getFile(document) ?: return
+        val selection = editor.selectionModel
+        val start = selection.selectionStart.coerceIn(0, document.textLength)
+        val end = selection.selectionEnd.coerceIn(0, document.textLength)
+        val startLine = document.getLineNumber(start) + 1
+        val endLine = document.getLineNumber(end) + 1
+        val startColumn = start - document.getLineStartOffset(startLine - 1) + 1
+        val endColumn = end - document.getLineStartOffset(endLine - 1) + 1
+        DockService.getInstance(project)
+            .addToChat(file.path, startLine, endLine, startColumn, endColumn)
     }
 }
 
